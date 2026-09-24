@@ -1,3160 +1,2485 @@
-/* ============================================================
-   NEXUS NETWORK INTELLIGENCE SYSTEM
-   Location-Aware Spatial Network Analysis
-   ============================================================ */
+/* =========================================================
+   NĀDI CORE // SPATIAL NETWORK INTELLIGENCE
+   Complete application controller
+   Includes:
+   - Leaflet network map
+   - Network filters
+   - Telemetry
+   - Local intelligence
+   - Dead-zone detection
+   - Scan engine
+   - System event stream
+   - GPS location
+   - MAP LOCATE ME control
+   ========================================================= */
 
-let networkMap;
+(() => {
+    "use strict";
 
-let renderedMarkers = [];
-let renderedZones = [];
+    const DATA = Array.isArray(window.networkData)
+        ? window.networkData
+        : [];
 
-let currentFilter = "ALL";
+    const $ = (id) => document.getElementById(id);
 
-let processedMeasurements = [];
-let deadZones = [];
+    const state = {
+        map: null,
+        markers: [],
+        userMarker: null,
+        accuracyCircle: null,
 
-let scanInProgress = false;
+        activeNetwork: "all",
+        userLocation: null,
+        activePoint: null,
+        filteredData: [],
 
-let userLocation = null;
-let userLocationMarker = null;
-let userAccuracyCircle = null;
-let userPulse = null;
+        events: [],
 
-const CONFIG = {
+        scanning: false,
+        scanTimer: null,
 
-    weights: {
-        signal: 0.40,
-        download: 0.25,
-        upload: 0.10,
-        latency: 0.25
-    },
-
-    thresholds: {
-        excellent: 80,
-        good: 60,
-        weak: 40
-    },
-
-    deadZoneThreshold: 40,
-
-    clusterDistance: 0.00055,
-
-    localRadius: 0.0018,
-
-    mapZoom: 15,
-
-    referenceLocation: {
-        latitude: 12.9716,
-        longitude: 77.5946
-    }
-};
-
-
-/* ============================================================
-   DOM
-   ============================================================ */
-
-const $ = id => document.getElementById(id);
-
-function setText(id, value) {
-
-    const element = $(id);
-
-    if (element) {
-        element.textContent = value;
-    }
-}
-
-
-/* ============================================================
-   NORMALIZATION
-   ============================================================ */
-
-function normalizeSignal(signal) {
-
-    return Math.max(
-        0,
-        Math.min(
-            100,
-            ((signal + 110) / 60) * 100
-        )
-    );
-}
-
-
-function normalizeDownload(download) {
-
-    return Math.max(
-        0,
-        Math.min(
-            100,
-            download
-        )
-    );
-}
-
-
-function normalizeUpload(upload) {
-
-    return Math.max(
-        0,
-        Math.min(
-            100,
-            (upload / 50) * 100
-        )
-    );
-}
-
-
-function normalizeLatency(latency) {
-
-    return Math.max(
-        0,
-        Math.min(
-            100,
-            ((200 - latency) / 190) * 100
-        )
-    );
-}
-
-
-/* ============================================================
-   NETWORK SCORE
-   ============================================================ */
-
-function calculateNetworkScore(point) {
-
-    const signal =
-        normalizeSignal(point.signal);
-
-    const download =
-        normalizeDownload(point.download);
-
-    const upload =
-        normalizeUpload(point.upload);
-
-    const latency =
-        normalizeLatency(point.latency);
-
-    return Math.round(
-        signal * CONFIG.weights.signal +
-        download * CONFIG.weights.download +
-        upload * CONFIG.weights.upload +
-        latency * CONFIG.weights.latency
-    );
-}
-
-
-/* ============================================================
-   CLASSIFICATION
-   ============================================================ */
-
-function classifyScore(score) {
-
-    if (score >= 80) {
-
-        return {
-            label: "EXCELLENT",
-            color: "#20e6a3"
-        };
-    }
-
-    if (score >= 60) {
-
-        return {
-            label: "GOOD",
-            color: "#00e5ff"
-        };
-    }
-
-    if (score >= 40) {
-
-        return {
-            label: "WEAK",
-            color: "#ffb020"
-        };
-    }
-
-    return {
-        label: "DEAD ZONE",
-        color: "#ff304f"
+        locateButton: null
     };
-}
 
+    const COLORS = {
+        cyan: "#00e5ff",
+        excellent: "#00f0a0",
+        good: "#00e5ff",
+        weak: "#ffb62e",
+        dead: "#ff4055",
+        neutral: "#6b8790"
+    };
 
-/* ============================================================
-   DIAGNOSIS
-   ============================================================ */
+    const clamp = (value, min, max) =>
+        Math.min(max, Math.max(min, value));
 
-function diagnose(point) {
+    const average = (values) =>
+        values.length
+            ? values.reduce((sum, value) => sum + value, 0) / values.length
+            : 0;
 
-    if (
-        point.signal <= -100 &&
-        point.latency >= 150 &&
-        point.download <= 10
+    function setText(id, value) {
+        const element = $(id);
+
+        if (element) {
+            element.textContent = value;
+        }
+    }
+
+    /* =====================================================
+       DISTANCE
+       ===================================================== */
+
+    function distanceKm(
+        lat1,
+        lon1,
+        lat2,
+        lon2
     ) {
+        const earthRadius = 6371;
 
-        return {
-            title:
-                "SEVERE CONNECTIVITY DEGRADATION",
-
-            description:
-                "Multiple network indicators are significantly degraded."
-        };
-    }
-
-
-    if (point.signal <= -100) {
-
-        return {
-            title:
-                "WEAK SIGNAL",
-
-            description:
-                "Low received signal strength is the dominant anomaly."
-        };
-    }
-
-
-    if (point.download <= 12) {
-
-        return {
-            title:
-                "LOW BANDWIDTH",
-
-            description:
-                "Download throughput is significantly below the expected range."
-        };
-    }
-
-
-    if (point.upload <= 5) {
-
-        return {
-            title:
-                "LOW UPLOAD CAPACITY",
-
-            description:
-                "Uplink performance is limiting network quality."
-        };
-    }
-
-
-    if (point.latency >= 120) {
-
-        return {
-            title:
-                "HIGH LATENCY",
-
-            description:
-                "Network response time is elevated despite available signal."
-        };
-    }
-
-
-    return {
-        title:
-            "NORMAL OPERATION",
-
-        description:
-            "No significant network anomaly detected."
-    };
-}
-
-
-/* ============================================================
-   DISTANCE
-   ============================================================ */
-
-function distanceBetween(a, b) {
-
-    const lat =
-        a.latitude -
-        b.latitude;
-
-    const lon =
-        a.longitude -
-        b.longitude;
-
-    return Math.sqrt(
-        lat * lat +
-        lon * lon
-    );
-}
-
-
-/* ============================================================
-   APPROXIMATE METERS
-   ============================================================ */
-
-function distanceInMeters(a, b) {
-
-    const latMeters =
-        (a.latitude - b.latitude) *
-        111320;
-
-    const lonMeters =
-        (a.longitude - b.longitude) *
-        111320 *
-        Math.cos(
-            a.latitude *
+        const dLat =
+            (lat2 - lat1) *
             Math.PI /
-            180
+            180;
+
+        const dLon =
+            (lon2 - lon1) *
+            Math.PI /
+            180;
+
+        const p1 =
+            lat1 *
+            Math.PI /
+            180;
+
+        const p2 =
+            lat2 *
+            Math.PI /
+            180;
+
+        const value =
+            Math.sin(dLat / 2) ** 2 +
+            Math.sin(dLon / 2) ** 2 *
+            Math.cos(p1) *
+            Math.cos(p2);
+
+        return (
+            earthRadius *
+            2 *
+            Math.atan2(
+                Math.sqrt(value),
+                Math.sqrt(1 - value)
+            )
         );
-
-    return Math.sqrt(
-        latMeters * latMeters +
-        lonMeters * lonMeters
-    );
-}
-
-
-/* ============================================================
-   CONFIDENCE
-   ============================================================ */
-
-function calculateConfidence(
-    point,
-    dataset
-) {
-
-    const nearby =
-        dataset.filter(
-            other => {
-
-                if (
-                    other.id === point.id
-                ) {
-                    return false;
-                }
-
-                return (
-                    distanceBetween(
-                        point,
-                        other
-                    ) <=
-                    CONFIG.clusterDistance
-                );
-            }
-        );
-
-
-    if (!nearby.length) {
-        return 61;
     }
 
+    function formatDistance(km) {
+        if (km < 1) {
+            return `${Math.round(km * 1000)} m`;
+        }
 
-    const scores =
-        nearby.map(
-            item =>
-                calculateNetworkScore(
-                    item
-                )
+        return `${km.toFixed(1)} km`;
+    }
+
+    /* =====================================================
+       QUALITY ENGINE
+       ===================================================== */
+
+    function signalScore(signal) {
+        if (!Number.isFinite(signal)) {
+            return 0;
+        }
+
+        return clamp(
+            ((signal + 115) / 65) * 100,
+            0,
+            100
         );
+    }
 
+    function downloadScore(download) {
+        if (!Number.isFinite(download)) {
+            return 0;
+        }
 
-    const average =
-        scores.reduce(
-            (sum, value) =>
-                sum + value,
-            0
-        ) / scores.length;
-
-
-    const difference =
-        Math.abs(
-            average -
-            calculateNetworkScore(point)
+        return clamp(
+            download,
+            0,
+            100
         );
+    }
 
+    function latencyScore(latency) {
+        if (!Number.isFinite(latency)) {
+            return 0;
+        }
 
-    let confidence =
-        94 -
-        difference * 1.8;
+        if (latency <= 20) return 100;
+        if (latency <= 40) return 92;
+        if (latency <= 60) return 80;
+        if (latency <= 90) return 65;
+        if (latency <= 130) return 45;
 
+        return 25;
+    }
 
-    confidence +=
-        Math.min(
-            5,
-            nearby.length
+    function pointScore(point) {
+        return Math.round(
+            signalScore(
+                Number(point.signal)
+            ) * 0.50 +
+
+            downloadScore(
+                Number(point.download)
+            ) * 0.30 +
+
+            latencyScore(
+                Number(point.latency)
+            ) * 0.20
         );
+    }
 
+    function classify(score) {
+        if (score >= 85) return "excellent";
+        if (score >= 65) return "good";
+        if (score >= 40) return "weak";
 
-    return Math.round(
-        Math.max(
-            55,
-            Math.min(
-                99,
-                confidence
-            )
-        )
-    );
-}
+        return "dead";
+    }
 
+    function qualityLabel(score) {
+        if (score >= 85) return "EXCELLENT";
+        if (score >= 65) return "GOOD";
+        if (score >= 40) return "WEAK";
 
-/* ============================================================
-   PROCESS DATA
-   ============================================================ */
+        return "DEAD ZONE";
+    }
 
-function processMeasurements() {
+    /* =====================================================
+       ENRICH DATA
+       ===================================================== */
 
-    processedMeasurements =
-        networkData.map(point => {
-
+    const enrichedData = DATA
+        .map(point => {
             const score =
-                calculateNetworkScore(
-                    point
-                );
+                pointScore(point);
 
             return {
-
                 ...point,
-
                 score,
-
-                classification:
-                    classifyScore(
-                        score
-                    ),
-
-                diagnosis:
-                    diagnose(
-                        point
-                    ),
-
-                confidence:
-                    calculateConfidence(
-                        point,
-                        networkData
-                    )
+                quality: classify(score)
             };
-        });
-
-
-    return processedMeasurements;
-}
-
-
-/* ============================================================
-   DEAD ZONES
-   ============================================================ */
-
-function detectDeadZones(dataset) {
-
-    const critical =
-        dataset.filter(
-            point =>
-                point.score <
-                CONFIG.deadZoneThreshold
+        })
+        .filter(point =>
+            Number.isFinite(
+                Number(point.latitude)
+            ) &&
+            Number.isFinite(
+                Number(point.longitude)
+            )
         );
 
+    state.filteredData = [
+        ...enrichedData
+    ];
 
-    const visited =
-        new Set();
+    /* =====================================================
+       DATASET CENTER
+       ===================================================== */
 
-    const clusters = [];
-
-
-    for (
-        const point
-        of critical
-    ) {
-
-        if (
-            visited.has(
-                point.id
-            )
-        ) {
-            continue;
+    function getDatasetCenter() {
+        if (!enrichedData.length) {
+            return [
+                12.9716,
+                77.5946
+            ];
         }
 
+        return [
+            average(
+                enrichedData.map(
+                    point =>
+                        Number(point.latitude)
+                )
+            ),
 
-        const cluster = [];
+            average(
+                enrichedData.map(
+                    point =>
+                        Number(point.longitude)
+                )
+            )
+        ];
+    }
 
-        const queue = [point];
+    /* =====================================================
+       NEARBY POINTS
+       ===================================================== */
 
-        visited.add(point.id);
+    function getNearbyPoints(
+        latitude,
+        longitude,
+        radius = 1.25
+    ) {
+        return state.filteredData
+            .map(point => ({
+                point,
 
+                distance:
+                    distanceKm(
+                        latitude,
+                        longitude,
+                        Number(point.latitude),
+                        Number(point.longitude)
+                    )
+            }))
 
-        while (queue.length) {
+            .filter(item =>
+                item.distance <= radius
+            )
 
-            const current =
-                queue.shift();
+            .sort(
+                (a, b) =>
+                    a.distance -
+                    b.distance
+            );
+    }
 
-            cluster.push(
-                current
+    /* =====================================================
+       MAP
+       ===================================================== */
+
+    function initializeMap() {
+        const mapElement =
+            $("networkMap");
+
+        if (
+            !mapElement ||
+            typeof L === "undefined"
+        ) {
+            return;
+        }
+
+        state.map =
+            L.map(
+                mapElement,
+                {
+                    zoomControl: true,
+                    attributionControl: true,
+                    preferCanvas: true
+                }
             );
 
+        state.map.setView(
+            getDatasetCenter(),
+            14
+        );
 
-            for (
-                const candidate
-                of critical
-            ) {
+        L.tileLayer(
+            "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            {
+                maxZoom: 19,
 
+                attribution:
+                    "&copy; OpenStreetMap contributors"
+            }
+        ).addTo(
+            state.map
+        );
+
+        renderMarkers();
+
+        setTimeout(() => {
+            if (state.map) {
+                state.map.invalidateSize();
+            }
+        }, 250);
+
+        addEvent(
+            "SYSTEM",
+            `${enrichedData.length} spatial measurements indexed`,
+            "ONLINE",
+            "info"
+        );
+    }
+
+    /* =====================================================
+       MARKER COLORS
+       ===================================================== */
+
+    function markerColor(
+        quality
+    ) {
+        return (
+            COLORS[quality] ||
+            COLORS.neutral
+        );
+    }
+
+    /* =====================================================
+       CLEAR MAP MARKERS
+       ===================================================== */
+
+    function clearMarkers() {
+        state.markers.forEach(
+            marker => {
                 if (
-                    visited.has(
-                        candidate.id
-                    )
+                    state.map &&
+                    state.map.hasLayer(marker)
                 ) {
-                    continue;
-                }
-
-
-                if (
-                    distanceBetween(
-                        current,
-                        candidate
-                    ) <=
-                    CONFIG.clusterDistance
-                ) {
-
-                    visited.add(
-                        candidate.id
-                    );
-
-                    queue.push(
-                        candidate
+                    state.map.removeLayer(
+                        marker
                     );
                 }
             }
+        );
+
+        state.markers = [];
+    }
+
+    /* =====================================================
+       POPUP
+       ===================================================== */
+
+    function buildPopup(point) {
+        return `
+            <div class="nadi-popup">
+
+                <div class="nadi-popup-title">
+                    NODE ${String(point.id).padStart(2, "0")}
+                </div>
+
+                <div class="nadi-popup-status">
+                    ${qualityLabel(point.score)}
+                </div>
+
+                <div class="nadi-popup-grid">
+
+                    <span>SIGNAL</span>
+                    <strong>
+                        ${point.signal} dBm
+                    </strong>
+
+                    <span>DOWNLOAD</span>
+                    <strong>
+                        ${Number(point.download).toFixed(1)} Mbps
+                    </strong>
+
+                    <span>LATENCY</span>
+                    <strong>
+                        ${point.latency} ms
+                    </strong>
+
+                    <span>NETWORK</span>
+                    <strong>
+                        ${point.network || "UNKNOWN"}
+                    </strong>
+
+                    <span>SCORE</span>
+                    <strong>
+                        ${point.score}/100
+                    </strong>
+
+                </div>
+
+            </div>
+        `;
+    }
+
+    /* =====================================================
+       RENDER NETWORK MARKERS
+       ===================================================== */
+
+    function renderMarkers() {
+        if (!state.map) {
+            return;
         }
 
+        clearMarkers();
+
+        state.filteredData.forEach(
+            point => {
+
+                const marker =
+                    L.circleMarker(
+                        [
+                            Number(point.latitude),
+                            Number(point.longitude)
+                        ],
+                        {
+                            radius:
+                                point.quality === "dead"
+                                    ? 7
+                                    : point.quality === "weak"
+                                        ? 6
+                                        : 5,
+
+                            color: "#dffaff",
+
+                            weight: 1,
+
+                            fillColor:
+                                markerColor(
+                                    point.quality
+                                ),
+
+                            fillOpacity: 0.86,
+
+                            opacity: 0.95
+                        }
+                    );
+
+                marker.bindPopup(
+                    buildPopup(point),
+                    {
+                        closeButton: false,
+
+                        className:
+                            "nadi-popup-shell"
+                    }
+                );
+
+                marker.on(
+                    "click",
+                    () => {
+
+                        state.activePoint =
+                            point;
+
+                        updateLocalIntelligence(
+                            Number(point.latitude),
+                            Number(point.longitude)
+                        );
+
+                        addEvent(
+                            "NODE",
+                            `Node ${point.id} selected from spatial grid`,
+                            `${point.score} PTS`,
+                            point.quality === "dead"
+                                ? "critical"
+                                : "info"
+                        );
+                    }
+                );
+
+                marker.addTo(
+                    state.map
+                );
+
+                state.markers.push(
+                    marker
+                );
+            }
+        );
+
+        renderDeadZones();
+    }
+
+    /* =====================================================
+       DEAD ZONE CLUSTERS
+       ===================================================== */
+
+    function buildDeadZoneClusters(
+        points
+    ) {
+        const deadPoints =
+            points.filter(
+                point =>
+                    point.quality === "dead"
+            );
+
+        const clusters = [];
+        const used = new Set();
+
+        deadPoints.forEach(
+            (point, index) => {
+
+                if (
+                    used.has(index)
+                ) {
+                    return;
+                }
+
+                const cluster = [
+                    point
+                ];
+
+                used.add(index);
+
+                deadPoints.forEach(
+                    (
+                        candidate,
+                        candidateIndex
+                    ) => {
+
+                        if (
+                            used.has(
+                                candidateIndex
+                            )
+                        ) {
+                            return;
+                        }
+
+                        const distance =
+                            distanceKm(
+                                Number(point.latitude),
+                                Number(point.longitude),
+                                Number(candidate.latitude),
+                                Number(candidate.longitude)
+                            );
+
+                        if (
+                            distance <= 0.35
+                        ) {
+                            cluster.push(
+                                candidate
+                            );
+
+                            used.add(
+                                candidateIndex
+                            );
+                        }
+                    }
+                );
+
+                clusters.push(
+                    cluster
+                );
+            }
+        );
+
+        return clusters;
+    }
+
+    /* =====================================================
+       RENDER DEAD ZONES
+       ===================================================== */
+
+    function renderDeadZones() {
+        if (!state.map) {
+            return;
+        }
+
+        const clusters =
+            buildDeadZoneClusters(
+                state.filteredData
+            );
+
+        clusters.forEach(
+            cluster => {
+
+                if (!cluster.length) {
+                    return;
+                }
+
+                const latitude =
+                    average(
+                        cluster.map(
+                            point =>
+                                Number(
+                                    point.latitude
+                                )
+                        )
+                    );
+
+                const longitude =
+                    average(
+                        cluster.map(
+                            point =>
+                                Number(
+                                    point.longitude
+                                )
+                        )
+                    );
+
+                const circle =
+                    L.circle(
+                        [
+                            latitude,
+                            longitude
+                        ],
+                        {
+                            radius:
+                                Math.max(
+                                    70,
+                                    cluster.length * 45
+                                ),
+
+                            color:
+                                COLORS.dead,
+
+                            weight: 1.5,
+
+                            dashArray:
+                                "7 7",
+
+                            fillColor:
+                                COLORS.dead,
+
+                            fillOpacity:
+                                0.045,
+
+                            opacity:
+                                0.75,
+
+                            interactive:
+                                false
+                        }
+                    ).addTo(
+                        state.map
+                    );
+
+                state.markers.push(
+                    circle
+                );
+            }
+        );
+
+        setText(
+            "deadZoneCount",
+            String(
+                clusters.length
+            ).padStart(2, "0")
+        );
+    }
+
+    /* =====================================================
+       GLOBAL SCORE
+       ===================================================== */
+
+    function calculateGlobalScore(
+        points = state.filteredData
+    ) {
+        if (!points.length) {
+            return 0;
+        }
+
+        return Math.round(
+            average(
+                points.map(
+                    point =>
+                        point.score
+                )
+            )
+        );
+    }
+
+    function updateGlobalMetrics() {
+        const score =
+            calculateGlobalScore();
+
+        setText(
+            "networkScore",
+            score
+        );
+
+        setText(
+            "coreStatus",
+            qualityLabel(score)
+        );
+
+        setText(
+            "measurementCount",
+            state.filteredData.length
+        );
+
+        setText(
+            "deadZoneCount",
+            String(
+                buildDeadZoneClusters(
+                    state.filteredData
+                ).length
+            ).padStart(2, "0")
+        );
+    }
+
+    /* =====================================================
+       NETWORK FILTERS
+       ===================================================== */
+
+    function setNetworkFilter(
+        network
+    ) {
+        state.activeNetwork =
+            network;
+
+        document
+            .querySelectorAll(
+                ".network-filters button"
+            )
+            .forEach(
+                button => {
+
+                    button.classList.toggle(
+                        "active",
+
+                        String(
+                            button.dataset.network
+                        ).toLowerCase() ===
+                        String(network).toLowerCase()
+                    );
+                }
+            );
+
+        state.filteredData =
+            network === "all"
+                ? [...enrichedData]
+                : enrichedData.filter(
+                    point =>
+                        String(
+                            point.network
+                        ).toLowerCase() ===
+                        String(network).toLowerCase()
+                );
+
+        renderMarkers();
+
+        updateGlobalMetrics();
 
         if (
-            cluster.length >= 2
+            state.userLocation
         ) {
+            updateLocalIntelligence(
+                state.userLocation.lat,
+                state.userLocation.lon
+            );
+        }
 
-            clusters.push(
-                cluster
+        addEvent(
+            "FILTER",
+            `Network source switched to ${
+                network === "all"
+                    ? "ALL NETWORKS"
+                    : network
+            }`,
+            "UPDATED",
+            "info"
+        );
+    }
+
+    /* =====================================================
+       LOCAL INTELLIGENCE
+       ===================================================== */
+
+    function calculateLocalProfile(
+        latitude,
+        longitude
+    ) {
+        const nearby =
+            getNearbyPoints(
+                latitude,
+                longitude
+            );
+
+        let selected;
+
+        if (
+            nearby.length >= 3
+        ) {
+            selected =
+                nearby.slice(
+                    0,
+                    12
+                );
+        } else {
+            selected =
+                state.filteredData
+                    .map(point => ({
+                        point,
+
+                        distance:
+                            distanceKm(
+                                latitude,
+                                longitude,
+                                Number(point.latitude),
+                                Number(point.longitude)
+                            )
+                    }))
+                    .sort(
+                        (a, b) =>
+                            a.distance -
+                            b.distance
+                    )
+                    .slice(
+                        0,
+                        5
+                    );
+        }
+
+        if (!selected.length) {
+            return null;
+        }
+
+        const weights =
+            selected.map(
+                item =>
+                    1 /
+                    Math.max(
+                        item.distance,
+                        0.05
+                    )
+            );
+
+        const totalWeight =
+            weights.reduce(
+                (sum, value) =>
+                    sum + value,
+                0
+            );
+
+        const score =
+            Math.round(
+                selected.reduce(
+                    (
+                        sum,
+                        item,
+                        index
+                    ) =>
+                        sum +
+                        item.point.score *
+                        weights[index],
+                    0
+                ) /
+                totalWeight
+            );
+
+        const points =
+            selected.map(
+                item =>
+                    item.point
+            );
+
+        return {
+            score: clamp(
+                score,
+                0,
+                100
+            ),
+
+            points,
+
+            nearbyCount:
+                nearby.length,
+
+            nearest:
+                selected[0],
+
+            signal:
+                Math.round(
+                    average(
+                        points.map(
+                            point =>
+                                Number(
+                                    point.signal
+                                )
+                        )
+                    )
+                ),
+
+            latency:
+                Math.round(
+                    average(
+                        points.map(
+                            point =>
+                                Number(
+                                    point.latency
+                                )
+                        )
+                    )
+                ),
+
+            download:
+                average(
+                    points.map(
+                        point =>
+                            Number(
+                                point.download
+                            )
+                    )
+                )
+        };
+    }
+
+    function updateLocalIntelligence(
+        latitude,
+        longitude
+    ) {
+        const profile =
+            calculateLocalProfile(
+                latitude,
+                longitude
+            );
+
+        if (!profile) {
+            return;
+        }
+
+        setText(
+            "localScore",
+            profile.score
+        );
+
+        setText(
+            "localCondition",
+            qualityLabel(
+                profile.score
+            )
+        );
+
+        setText(
+            "localSignal",
+            `${profile.signal} dBm`
+        );
+
+        setText(
+            "localLatency",
+            `${profile.latency} ms`
+        );
+
+        setText(
+            "localNodes",
+            profile.nearbyCount
+        );
+
+        if (
+            profile.nearest
+        ) {
+            const point =
+                profile.nearest.point;
+
+            setText(
+                "localAnomaly",
+
+                point.quality === "dead"
+                    ? `DZ-${String(point.id).padStart(2, "0")}`
+                    : `NODE ${point.id}`
+            );
+
+            setText(
+                "localDistance",
+                formatDistance(
+                    profile.nearest.distance
+                )
+            );
+        }
+
+        setText(
+            "activeRegion",
+            `${latitude.toFixed(4)}° N`
+        );
+
+        setText(
+            "activeLongitude",
+            `${longitude.toFixed(4)}° E`
+        );
+
+        setText(
+            "mapLatitude",
+            latitude.toFixed(4)
+        );
+
+        setText(
+            "mapLongitude",
+            longitude.toFixed(4)
+        );
+
+        const stability =
+            clamp(
+                Math.round(
+                    profile.score *
+                    0.72 +
+
+                    latencyScore(
+                        profile.latency
+                    ) *
+                    0.28
+                ),
+                0,
+                100
+            );
+
+        setText(
+            "signalValue",
+            profile.signal
+        );
+
+        setText(
+            "downloadValue",
+            profile.download.toFixed(1)
+        );
+
+        setText(
+            "latencyValue",
+            profile.latency
+        );
+
+        setText(
+            "stabilityValue",
+            stability
+        );
+
+        updateTelemetryQuality(
+            profile.signal,
+            profile.download,
+            profile.latency,
+            stability
+        );
+
+        updateDiagnosis(
+            profile
+        );
+    }
+
+    /* =====================================================
+       DIAGNOSIS
+       ===================================================== */
+
+    function updateDiagnosis(
+        profile
+    ) {
+        const score =
+            profile.score;
+
+        let title;
+        let description;
+        let recommendation;
+
+        if (score < 40) {
+
+            title =
+                "SEVERE CONNECTIVITY DEGRADATION";
+
+            description =
+                "Multiple network indicators are significantly degraded in the active spatial sector.";
+
+            recommendation =
+                "Immediate investigation recommended for this network anomaly.";
+
+        } else if (score < 65) {
+
+            title =
+                "MODERATE CONNECTIVITY DEGRADATION";
+
+            description =
+                "Local measurements indicate reduced signal quality or elevated response time.";
+
+            recommendation =
+                "Monitor this sector for persistent coverage degradation.";
+
+        } else if (score < 85) {
+
+            title =
+                "STABLE CONNECTIVITY";
+
+            description =
+                "Local connectivity is stable with minor performance variation.";
+
+            recommendation =
+                "Continue monitoring the surrounding network sector.";
+
+        } else {
+
+            title =
+                "HIGH QUALITY CONNECTIVITY";
+
+            description =
+                "Local measurements indicate strong signal, responsive latency and healthy throughput.";
+
+            recommendation =
+                "No immediate intervention required.";
+        }
+
+        setText(
+            "statusLabel",
+            qualityLabel(score)
+        );
+
+        setText(
+            "statusDescription",
+            `Local network intelligence score ${score}/100.`
+        );
+
+        setText(
+            "anomalyTitle",
+            title
+        );
+
+        setText(
+            "diagnosisTitle",
+            title
+        );
+
+        setText(
+            "diagnosisDescription",
+            description
+        );
+
+        setText(
+            "recommendationText",
+            recommendation
+        );
+
+        if (
+            profile.nearest
+        ) {
+            const point =
+                profile.nearest.point;
+
+            setText(
+                "anomalySector",
+                `NODE ${point.id}`
+            );
+
+            setText(
+                "anomalySignal",
+                `${point.signal} dBm`
+            );
+
+            const confidence =
+                clamp(
+                    Math.round(
+                        62 +
+                        Math.abs(
+                            Number(point.signal) +
+                            80
+                        ) *
+                        0.55 +
+
+                        (
+                            point.quality === "dead"
+                                ? 18
+                                : 0
+                        )
+                    ),
+                    60,
+                    98
+                );
+
+            setText(
+                "anomalyConfidence",
+                `${confidence}%`
             );
         }
     }
 
+    /* =====================================================
+       TELEMETRY
+       ===================================================== */
 
-    return clusters.map(
-        (cluster, index) => {
+    function setBar(
+        id,
+        value
+    ) {
+        const element =
+            $(id);
 
-            const latitude =
-                cluster.reduce(
-                    (sum, point) =>
-                        sum +
-                        point.latitude,
-                    0
-                ) /
-                cluster.length;
+        if (element) {
+            element.style.width =
+                `${clamp(
+                    value,
+                    0,
+                    100
+                )}%`;
+        }
+    }
 
-
-            const longitude =
-                cluster.reduce(
-                    (sum, point) =>
-                        sum +
-                        point.longitude,
-                    0
-                ) /
-                cluster.length;
-
-
-            const averageScore =
-                cluster.reduce(
-                    (sum, point) =>
-                        sum +
-                        point.score,
-                    0
-                ) /
-                cluster.length;
-
-
-            const causes = {};
-
-
-            cluster.forEach(
-                point => {
-
-                    const cause =
-                        point.diagnosis.title;
-
-                    causes[cause] =
-                        (causes[cause] || 0) +
-                        1;
-                }
+    function updateTelemetryQuality(
+        signal,
+        download,
+        latency,
+        stability
+    ) {
+        const signalQuality =
+            Math.round(
+                signalScore(signal)
             );
 
+        const downloadQuality =
+            Math.round(
+                downloadScore(download)
+            );
 
-            const diagnosis =
-                Object.entries(
-                    causes
-                ).sort(
-                    (a, b) =>
-                        b[1] -
-                        a[1]
-                )[0][0];
+        const latencyQuality =
+            Math.round(
+                latencyScore(latency)
+            );
 
+        setText(
+            "signalQuality",
+            `${signalQuality}%`
+        );
 
-            return {
+        setText(
+            "downloadQuality",
+            `${downloadQuality}%`
+        );
 
-                id:
-                    `DZ-${String(
-                        index + 1
-                    ).padStart(2, "0")}`,
+        setText(
+            "latencyQuality",
+            `${latencyQuality}%`
+        );
 
-                latitude,
+        setText(
+            "stabilityQuality",
+            `${stability}%`
+        );
 
-                longitude,
+        setBar(
+            "signalBar",
+            signalQuality
+        );
 
-                points:
-                    cluster,
+        setBar(
+            "downloadBar",
+            downloadQuality
+        );
 
-                size:
-                    cluster.length,
+        setBar(
+            "latencyBar",
+            latencyQuality
+        );
 
-                averageScore:
+        setBar(
+            "stabilityBar",
+            stability
+        );
+    }
+
+    function startTelemetryPulse() {
+        setInterval(
+            () => {
+
+                if (
+                    state.scanning ||
+                    !state.activePoint
+                ) {
+                    return;
+                }
+
+                const point =
+                    state.activePoint;
+
+                const signal =
+                    Number(
+                        point.signal
+                    ) +
+                    (
+                        Math.random() -
+                        0.5
+                    ) *
+                    2;
+
+                const latency =
+                    Math.max(
+                        5,
+
+                        Number(
+                            point.latency
+                        ) +
+
+                        (
+                            Math.random() -
+                            0.5
+                        ) *
+                        5
+                    );
+
+                const download =
+                    Math.max(
+                        0,
+
+                        Number(
+                            point.download
+                        ) +
+
+                        (
+                            Math.random() -
+                            0.5
+                        ) *
+                        2
+                    );
+
+                const stability =
+                    clamp(
+                        Math.round(
+                            signalScore(
+                                signal
+                            ) *
+                            0.45 +
+
+                            downloadScore(
+                                download
+                            ) *
+                            0.25 +
+
+                            latencyScore(
+                                latency
+                            ) *
+                            0.30
+                        ),
+                        0,
+                        100
+                    );
+
+                setText(
+                    "signalValue",
                     Math.round(
-                        averageScore
-                    ),
+                        signal
+                    )
+                );
 
-                diagnosis
-            };
+                setText(
+                    "downloadValue",
+                    download.toFixed(1)
+                );
+
+                setText(
+                    "latencyValue",
+                    Math.round(
+                        latency
+                    )
+                );
+
+                setText(
+                    "stabilityValue",
+                    stability
+                );
+
+                updateTelemetryQuality(
+                    signal,
+                    download,
+                    latency,
+                    stability
+                );
+
+            },
+            3500
+        );
+    }
+
+    /* =====================================================
+       USER LOCATION
+       ===================================================== */
+
+    function showUserLocation(
+        latitude,
+        longitude,
+        accuracy = 30,
+        source = "GPS"
+    ) {
+        if (!state.map) {
+            return;
         }
-    );
-}
 
+        if (
+            state.userMarker
+        ) {
+            state.map.removeLayer(
+                state.userMarker
+            );
+        }
 
-/* ============================================================
-   MAP
-   ============================================================ */
+        if (
+            state.accuracyCircle
+        ) {
+            state.map.removeLayer(
+                state.accuracyCircle
+            );
+        }
 
-function initializeMap() {
+        const icon =
+            L.divIcon({
+                className:
+                    "nadi-user-location",
 
-    networkMap =
-        L.map(
-            "networkMap",
+                html: `
+                    <div class="nadi-user-pulse">
+                        <span></span>
+                    </div>
+                `,
+
+                iconSize: [
+                    24,
+                    24
+                ],
+
+                iconAnchor: [
+                    12,
+                    12
+                ]
+            });
+
+        state.userMarker =
+            L.marker(
+                [
+                    latitude,
+                    longitude
+                ],
+                {
+                    icon,
+
+                    zIndexOffset:
+                        1000
+                }
+            ).addTo(
+                state.map
+            );
+
+        state.userMarker.bindTooltip(
+            "ACTIVE USER LOCATION",
             {
-                zoomControl: false,
-
-                attributionControl: true
+                direction: "top",
+                offset: [
+                    0,
+                    -10
+                ]
             }
-        ).setView(
-            [
-                CONFIG.referenceLocation.latitude,
-                CONFIG.referenceLocation.longitude
-            ],
-
-            CONFIG.mapZoom
         );
 
+        state.accuracyCircle =
+            L.circle(
+                [
+                    latitude,
+                    longitude
+                ],
+                {
+                    radius:
+                        Math.max(
+                            Number(
+                                accuracy
+                            ) || 30,
+                            25
+                        ),
 
-    L.control.zoom({
-        position:
-            "bottomright"
-    }).addTo(
-        networkMap
-    );
+                    color:
+                        COLORS.cyan,
 
+                    weight: 1,
 
-    L.tileLayer(
-        "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-        {
-            maxZoom: 19,
+                    opacity: 0.35,
 
-            attribution:
-                "&copy; OpenStreetMap contributors"
+                    fillColor:
+                        COLORS.cyan,
+
+                    fillOpacity:
+                        0.025,
+
+                    interactive:
+                        false
+                }
+            ).addTo(
+                state.map
+            );
+
+        state.userLocation = {
+            lat: latitude,
+            lon: longitude,
+            accuracy
+        };
+
+        updateLocalIntelligence(
+            latitude,
+            longitude
+        );
+
+        if (
+            source === "GPS"
+        ) {
+            addEvent(
+                "GPS",
+                "Active user location acquired",
+                "LOCKED",
+                "success"
+            );
         }
-    ).addTo(
-        networkMap
-    );
+    }
 
+    /* =====================================================
+       LOCATE ME BUTTON
+       ===================================================== */
 
-    createLocationControl();
+    function setLocateButtonState(
+        mode
+    ) {
+        const button =
+            state.locateButton;
 
-    createLocationStatus();
+        if (!button) {
+            return;
+        }
 
-    requestUserLocation();
-}
+        const label =
+            button.querySelector(
+                ".locate-label"
+            );
 
-
-/* ============================================================
-   LOCATION CONTROL
-   ============================================================ */
-
-function createLocationControl() {
-
-    const button =
-        document.createElement(
-            "button"
+        button.classList.toggle(
+            "locating",
+            mode === "locating"
         );
 
-
-    button.id =
-        "locateMeButton";
-
-    button.className =
-        "nexus-location-control";
-
-
-    button.innerHTML = `
-        <span class="locate-icon">◎</span>
-        <span>LOCATE ME</span>
-    `;
-
-
-    button.addEventListener(
-        "click",
-        () => {
+        if (label) {
 
             if (
-                userLocation
+                mode === "locating"
             ) {
+                label.textContent =
+                    "LOCATING...";
 
-                networkMap.flyTo(
+            } else if (
+                mode === "locked"
+            ) {
+                label.textContent =
+                    "LOCATION LOCKED";
+
+            } else {
+                label.textContent =
+                    "LOCATE ME";
+            }
+        }
+
+        button.disabled =
+            mode === "locating";
+    }
+
+    function requestUserLocation(
+        manual = false
+    ) {
+        if (
+            !navigator.geolocation
+        ) {
+
+            addEvent(
+                "GPS",
+                "Browser location services unavailable",
+                "FALLBACK",
+                "warning"
+            );
+
+            if (!manual) {
+                useDatasetLocation();
+            } else {
+                setLocateButtonState(
+                    "ready"
+                );
+            }
+
+            return;
+        }
+
+        setLocateButtonState(
+            "locating"
+        );
+
+        addEvent(
+            "GPS",
+
+            manual
+                ? "Manual location request initiated"
+                : "Acquiring active user location",
+
+            "SEARCHING",
+            "info"
+        );
+
+        navigator.geolocation.getCurrentPosition(
+            position => {
+
+                const {
+                    latitude,
+                    longitude,
+                    accuracy
+                } =
+                    position.coords;
+
+                showUserLocation(
+                    latitude,
+                    longitude,
+                    accuracy,
+                    "GPS"
+                );
+
+                state.map.flyTo(
                     [
-                        userLocation.latitude,
-                        userLocation.longitude
+                        latitude,
+                        longitude
                     ],
-
-                    17,
-
+                    16,
                     {
                         duration:
                             1.2
                     }
                 );
 
-            }
-            else {
+                setLocateButtonState(
+                    "locked"
+                );
 
+                setTimeout(
+                    () => {
+
+                        if (
+                            state.locateButton
+                        ) {
+                            setLocateButtonState(
+                                "ready"
+                            );
+                        }
+
+                    },
+                    2400
+                );
+            },
+
+            error => {
+
+                let reason =
+                    "Location could not be acquired";
+
+                if (
+                    error &&
+                    error.code === 1
+                ) {
+                    reason =
+                        "Location permission denied";
+                }
+
+                if (
+                    error &&
+                    error.code === 2
+                ) {
+                    reason =
+                        "Location unavailable";
+                }
+
+                if (
+                    error &&
+                    error.code === 3
+                ) {
+                    reason =
+                        "Location request timed out";
+                }
+
+                addEvent(
+                    "GPS",
+                    `${reason}; using analysis dataset`,
+                    "FALLBACK",
+                    "warning"
+                );
+
+                setLocateButtonState(
+                    "ready"
+                );
+
+                if (!manual) {
+                    useDatasetLocation();
+                }
+            },
+
+            {
+                enableHighAccuracy:
+                    true,
+
+                timeout:
+                    12000,
+
+                maximumAge:
+                    30000
+            }
+        );
+    }
+
+    /* =====================================================
+       DATASET FALLBACK LOCATION
+       ===================================================== */
+
+    function useDatasetLocation() {
+        const center =
+            getDatasetCenter();
+
+        showUserLocation(
+            center[0],
+            center[1],
+            100,
+            "DATASET"
+        );
+
+        if (state.map) {
+            state.map.setView(
+                center,
+                14,
+                {
+                    animate:
+                        true
+                }
+            );
+        }
+    }
+
+    /* =====================================================
+       INITIALIZE LOCATE ME BUTTON
+       ===================================================== */
+
+    function initializeLocateMeButton() {
+        const mapElement =
+            $("networkMap");
+
+        if (
+            !mapElement ||
+            state.locateButton
+        ) {
+            return;
+        }
+
+        mapElement.style.position =
+            "relative";
+
+        const button =
+            document.createElement(
+                "button"
+            );
+
+        button.id =
+            "locateMeButton";
+
+        button.type =
+            "button";
+
+        button.className =
+            "nadi-locate-control";
+
+        button.innerHTML = `
+            <span class="nadi-locate-icon">
+                <span></span>
+            </span>
+
+            <span class="locate-label">
+                LOCATE ME
+            </span>
+        `;
+
+        button.addEventListener(
+            "click",
+            () => {
                 requestUserLocation(
                     true
                 );
             }
-        }
-    );
+        );
 
-
-    document
-        .getElementById(
-            "networkMap"
-        )
-        .appendChild(
+        mapElement.appendChild(
             button
         );
-}
 
-
-/* ============================================================
-   LOCATION STATUS
-   ============================================================ */
-
-function createLocationStatus() {
-
-    const panel =
-        document.createElement(
-            "div"
-        );
-
-
-    panel.id =
-        "locationStatus";
-
-    panel.className =
-        "location-status";
-
-
-    panel.innerHTML = `
-
-        <div class="location-status-dot"></div>
-
-        <div>
-
-            <div class="location-status-title">
-                LOCATION
-            </div>
-
-            <div
-                id="locationStatusText"
-                class="location-status-text"
-            >
-                ACQUIRING POSITION...
-            </div>
-
-        </div>
-
-    `;
-
-
-    document
-        .getElementById(
-            "networkMap"
-        )
-        .appendChild(
-            panel
-        );
-}
-
-
-/* ============================================================
-   GEOLOCATION
-   ============================================================ */
-
-function requestUserLocation(
-    showEvent = false
-) {
-
-    if (
-        !navigator.geolocation
-    ) {
-
-        handleLocationFailure(
-            "GEOLOCATION UNSUPPORTED"
-        );
-
-        return;
+        state.locateButton =
+            button;
     }
 
+    /* =====================================================
+       SCAN ENGINE
+       ===================================================== */
 
-    updateLocationStatus(
-        "REQUESTING ACCESS..."
-    );
-
-
-    navigator.geolocation.getCurrentPosition(
-
-        position => {
-
-            userLocation = {
-
-                latitude:
-                    position.coords.latitude,
-
-                longitude:
-                    position.coords.longitude,
-
-                accuracy:
-                    position.coords.accuracy
-            };
-
-
-            handleLocationSuccess(
-                showEvent
-            );
-        },
-
-
-        error => {
-
-            let message =
-                "LOCATION ACCESS DENIED";
-
-
-            if (
-                error.code ===
-                error.POSITION_UNAVAILABLE
-            ) {
-
-                message =
-                    "POSITION UNAVAILABLE";
-            }
-
-
-            if (
-                error.code ===
-                error.TIMEOUT
-            ) {
-
-                message =
-                    "LOCATION REQUEST TIMEOUT";
-            }
-
-
-            handleLocationFailure(
-                message
-            );
-        },
-
-
-        {
-            enableHighAccuracy:
-                true,
-
-            timeout:
-                12000,
-
-            maximumAge:
-                60000
+    function runScan() {
+        if (
+            state.scanning
+        ) {
+            return;
         }
-    );
-}
 
-
-/* ============================================================
-   LOCATION SUCCESS
-   ============================================================ */
-
-function handleLocationSuccess(
-    showEvent
-) {
-
-    updateLocationStatus(
-        "POSITION LOCKED"
-    );
-
-
-    addUserLocationMarker();
-
-
-    networkMap.flyTo(
-        [
-            userLocation.latitude,
-            userLocation.longitude
-        ],
-
-        16,
-
-        {
-            duration:
-                1.5
-        }
-    );
-
-
-    updateCoordinates(
-        processedMeasurements
-    );
-
-
-    renderSystem();
-
-
-    if (
-        showEvent
-    ) {
-
-        addEvent(
-            "GPS",
-            "User position acquired",
-            "LOCKED"
-        );
-
-    }
-    else {
-
-        addEvent(
-            "GPS",
-            "Location services initialized",
-            "LOCKED"
-        );
-    }
-}
-
-
-/* ============================================================
-   LOCATION FAILURE
-   ============================================================ */
-
-function handleLocationFailure(
-    message
-) {
-
-    updateLocationStatus(
-        "FALLBACK REGION"
-    );
-
-
-    addEvent(
-        "GPS",
-        `${message} — using simulated survey region`,
-        "FALLBACK"
-    );
-
-
-    networkMap.setView(
-        [
-            CONFIG.referenceLocation.latitude,
-            CONFIG.referenceLocation.longitude
-        ],
-
-        CONFIG.mapZoom
-    );
-}
-
-
-/* ============================================================
-   LOCATION STATUS
-   ============================================================ */
-
-function updateLocationStatus(
-    message
-) {
-
-    const element =
-        $("locationStatusText");
-
-
-    if (element) {
-        element.textContent =
-            message;
-    }
-}
-
-
-/* ============================================================
-   USER MARKER
-   ============================================================ */
-
-function addUserLocationMarker() {
-
-    if (
-        userLocationMarker
-    ) {
-
-        networkMap.removeLayer(
-            userLocationMarker
-        );
-    }
-
-
-    if (
-        userAccuracyCircle
-    ) {
-
-        networkMap.removeLayer(
-            userAccuracyCircle
-        );
-    }
-
-
-    if (
-        userPulse
-    ) {
-
-        networkMap.removeLayer(
-            userPulse
-        );
-    }
-
-
-    const position = [
-
-        userLocation.latitude,
-
-        userLocation.longitude
-    ];
-
-
-    userAccuracyCircle =
-        L.circle(
-            position,
-            {
-
-                radius:
-                    Math.min(
-                        userLocation.accuracy,
-                        300
-                    ),
-
-                color:
-                    "#00e5ff",
-
-                fillColor:
-                    "#00e5ff",
-
-                fillOpacity:
-                    0.045,
-
-                weight:
-                    1,
-
-                dashArray:
-                    "4 6"
-            }
-        ).addTo(
-            networkMap
-        );
-
-
-    userPulse =
-        L.circleMarker(
-            position,
-            {
-
-                radius:
-                    18,
-
-                color:
-                    "#00e5ff",
-
-                fillOpacity:
-                    0,
-
-                weight:
-                    1
-            }
-        ).addTo(
-            networkMap
-        );
-
-
-    const icon =
-        L.divIcon({
-
-            className:
-                "nexus-user-marker",
-
-            html: `
-
-                <div class="user-marker-outer">
-
-                    <div
-                        class="user-marker-ring"
-                    ></div>
-
-                    <div
-                        class="user-marker-core"
-                    ></div>
-
-                    <div
-                        class="user-marker-cross"
-                    ></div>
-
-                </div>
-
-            `,
-
-            iconSize:
-                [42, 42],
-
-            iconAnchor:
-                [21, 21]
-        });
-
-
-    userLocationMarker =
-        L.marker(
-            position,
-            {
-
-                icon,
-
-                zIndexOffset:
-                    5000
-            }
-        ).addTo(
-            networkMap
-        );
-
-
-    userLocationMarker.bindPopup(`
-
-        <div class="nexus-popup">
-
-            <div class="popup-title">
-                LOCAL POSITION
-            </div>
-
-            <div
-                class="popup-status"
-                style="color:#00e5ff"
-            >
-                GPS LOCKED
-            </div>
-
-            <div class="popup-grid">
-
-                <span>LATITUDE</span>
-
-                <strong>
-                    ${userLocation.latitude.toFixed(6)}
-                </strong>
-
-                <span>LONGITUDE</span>
-
-                <strong>
-                    ${userLocation.longitude.toFixed(6)}
-                </strong>
-
-                <span>ACCURACY</span>
-
-                <strong>
-                    ±${Math.round(
-                        userLocation.accuracy
-                    )} m
-                </strong>
-
-            </div>
-
-        </div>
-
-    `);
-}
-
-
-/* ============================================================
-   DISPLAY COORDINATES
-   ============================================================ */
-
-function getDisplayCoordinates(
-    point
-) {
-
-    if (
-        !userLocation
-    ) {
-
-        return {
-
-            latitude:
-                point.latitude,
-
-            longitude:
-                point.longitude
-        };
-    }
-
-
-    return {
-
-        latitude:
-            userLocation.latitude +
-            (
-                point.latitude -
-                CONFIG.referenceLocation.latitude
-            ),
-
-        longitude:
-            userLocation.longitude +
-            (
-                point.longitude -
-                CONFIG.referenceLocation.longitude
-            )
-    };
-}
-
-
-/* ============================================================
-   MARKERS
-   ============================================================ */
-
-function clearMarkers() {
-
-    renderedMarkers.forEach(
-        marker =>
-            networkMap.removeLayer(
-                marker
-            )
-    );
-
-
-    renderedMarkers = [];
-}
-
-
-function renderMarkers(
-    dataset
-) {
-
-    clearMarkers();
-
-
-    dataset.forEach(
-        point => {
-
-            const coordinates =
-                getDisplayCoordinates(
-                    point
-                );
-
-
-            const marker =
-                L.circleMarker(
-                    [
-                        coordinates.latitude,
-                        coordinates.longitude
-                    ],
-                    {
-
-                        radius:
-                            point.classification.label ===
-                            "DEAD ZONE"
-                                ? 7
-                                : 5,
-
-                        color:
-                            point.classification.color,
-
-                        fillColor:
-                            point.classification.color,
-
-                        fillOpacity:
-                            0.82,
-
-                        weight:
-                            1.5,
-
-                        className:
-                            "network-node"
-                    }
-                );
-
-
-            marker.bindPopup(`
-
-                <div class="nexus-popup">
-
-                    <div class="popup-title">
-                        NODE ${point.id}
-                    </div>
-
-                    <div
-                        class="popup-status"
-                        style="
-                            color:${point.classification.color}
-                        "
-                    >
-                        ${point.classification.label}
-                    </div>
-
-                    <div class="popup-score">
-
-                        NETWORK SCORE
-
-                        <strong>
-                            ${point.score}
-                        </strong>
-
-                    </div>
-
-                    <div class="popup-grid">
-
-                        <span>SIGNAL</span>
-                        <strong>
-                            ${point.signal} dBm
-                        </strong>
-
-                        <span>DOWNLOAD</span>
-                        <strong>
-                            ${point.download} Mbps
-                        </strong>
-
-                        <span>UPLOAD</span>
-                        <strong>
-                            ${point.upload} Mbps
-                        </strong>
-
-                        <span>LATENCY</span>
-                        <strong>
-                            ${point.latency} ms
-                        </strong>
-
-                        <span>NETWORK</span>
-                        <strong>
-                            ${point.network}
-                        </strong>
-
-                        <span>CONFIDENCE</span>
-                        <strong>
-                            ${point.confidence}%
-                        </strong>
-
-                    </div>
-
-                    <div class="popup-diagnosis">
-                        ${point.diagnosis.title}
-                    </div>
-
-                </div>
-
-            `);
-
-
-            marker.on(
-                "click",
-                () =>
-                    updateSelectedIntelligence(
-                        point
-                    )
-            );
-
-
-            marker.addTo(
-                networkMap
-            );
-
-
-            renderedMarkers.push(
-                marker
-            );
-        }
-    );
-}
-
-
-/* ============================================================
-   DEAD ZONE OVERLAYS
-   ============================================================ */
-
-function clearDeadZones() {
-
-    renderedZones.forEach(
-        zone =>
-            networkMap.removeLayer(
-                zone
-            )
-    );
-
-
-    renderedZones = [];
-}
-
-
-function renderDeadZones(
-    zones
-) {
-
-    clearDeadZones();
-
-
-    zones.forEach(
-        zone => {
-
-            const coordinates =
-                getDisplayCoordinates(
-                    zone
-                );
-
-
-            const radius =
-                Math.max(
-                    35,
-                    zone.size * 22
-                );
-
-
-            const circle =
-                L.circle(
-                    [
-                        coordinates.latitude,
-                        coordinates.longitude
-                    ],
-                    {
-
-                        radius,
-
-                        color:
-                            "#ff304f",
-
-                        fillColor:
-                            "#ff304f",
-
-                        fillOpacity:
-                            0.075,
-
-                        weight:
-                            1.5,
-
-                        dashArray:
-                            "6 6"
-                    }
-                );
-
-
-            circle.bindPopup(`
-
-                <div class="nexus-popup">
-
-                    <div class="popup-title">
-                        ${zone.id}
-                    </div>
-
-                    <div
-                        class="popup-status"
-                        style="color:#ff304f"
-                    >
-                        DEAD ZONE CLUSTER
-                    </div>
-
-                    <div class="popup-grid">
-
-                        <span>MEASUREMENTS</span>
-
-                        <strong>
-                            ${zone.size}
-                        </strong>
-
-                        <span>AVG SCORE</span>
-
-                        <strong>
-                            ${zone.averageScore}
-                        </strong>
-
-                        <span>PRIMARY CAUSE</span>
-
-                        <strong>
-                            ${zone.diagnosis}
-                        </strong>
-
-                    </div>
-
-                </div>
-
-            `);
-
-
-            circle.addTo(
-                networkMap
-            );
-
-
-            renderedZones.push(
-                circle
-            );
-        }
-    );
-}
-
-
-/* ============================================================
-   FILTER
-   ============================================================ */
-
-function getFilteredData() {
-
-    if (
-        currentFilter ===
-        "ALL"
-    ) {
-
-        return processedMeasurements;
-    }
-
-
-    return processedMeasurements.filter(
-        point =>
-            point.network.toUpperCase() ===
-            currentFilter
-    );
-}
-
-
-/* ============================================================
-   LOCAL INTELLIGENCE
-   ============================================================ */
-
-function calculateLocalIntelligence() {
-
-    if (
-        !userLocation
-    ) {
-
-        return null;
-    }
-
-
-    /*
-       Convert user position into the
-       same coordinate space as the
-       original simulated dataset.
-    */
-
-    const virtualUser = {
-
-        latitude:
-            CONFIG.referenceLocation.latitude,
-
-        longitude:
-            CONFIG.referenceLocation.longitude
-    };
-
-
-    const nearby =
-        processedMeasurements
-            .map(
-                point => ({
-
-                    ...point,
-
-                    distance:
-                        distanceInMeters(
-                            virtualUser,
-                            {
-                                latitude:
-                                    point.latitude,
-
-                                longitude:
-                                    point.longitude
-                            }
-                        )
-                })
-            )
-            .filter(
-                point =>
-                    point.distance <=
-                    CONFIG.localRadius *
-                    111320
-            )
-            .sort(
-                (a, b) =>
-                    a.distance -
-                    b.distance
-            );
-
-
-    /*
-       If no points fall within the
-       local radius, use nearest nodes.
-    */
-
-    const localPoints =
-        nearby.length
-            ? nearby.slice(0, 12)
-            : processedMeasurements
-                .map(
-                    point => ({
-
-                        ...point,
-
-                        distance:
-                            distanceInMeters(
-                                virtualUser,
-                                {
-                                    latitude:
-                                        point.latitude,
-
-                                    longitude:
-                                        point.longitude
-                                }
-                            )
-                    })
-                )
-                .sort(
-                    (a, b) =>
-                        a.distance -
-                        b.distance
-                )
-                .slice(0, 8);
-
-
-    if (!localPoints.length) {
-        return null;
-    }
-
-
-    const averageScore =
-        localPoints.reduce(
-            (sum, point) =>
-                sum + point.score,
-            0
-        ) /
-        localPoints.length;
-
-
-    const averageSignal =
-        localPoints.reduce(
-            (sum, point) =>
-                sum + point.signal,
-            0
-        ) /
-        localPoints.length;
-
-
-    const averageLatency =
-        localPoints.reduce(
-            (sum, point) =>
-                sum + point.latency,
-            0
-        ) /
-        localPoints.length;
-
-
-    const localScore =
-        Math.round(
-            averageScore
-        );
-
-
-    const classification =
-        classifyScore(
-            localScore
-        );
-
-
-    const nearestDeadZone =
-        deadZones
-            .map(
-                zone => ({
-
-                    ...zone,
-
-                    distance:
-                        distanceInMeters(
-                            virtualUser,
-                            zone
-                        )
-                })
-            )
-            .sort(
-                (a, b) =>
-                    a.distance -
-                    b.distance
-            )[0] || null;
-
-
-    return {
-
-        score:
-            localScore,
-
-        classification,
-
-        signal:
-            Math.round(
-                averageSignal
-            ),
-
-        latency:
-            Math.round(
-                averageLatency
-            ),
-
-        nodes:
-            localPoints.length,
-
-        nearestDeadZone,
-
-        nearby:
-            localPoints
-    };
-}
-
-
-/* ============================================================
-   LOCAL INTELLIGENCE UI
-   ============================================================ */
-
-function createLocalIntelligencePanel() {
-
-    if (
-        $("localIntelligence")
-    ) {
-        return;
-    }
-
-
-    const panel =
-        document.createElement(
-            "section"
-        );
-
-
-    panel.id =
-        "localIntelligence";
-
-
-    panel.className =
-        "intelligence-section local-intelligence-section";
-
-
-    panel.innerHTML = `
-
-        <div class="section-label">
-            LOCAL INTELLIGENCE
-        </div>
-
-        <div class="local-score-row">
-
-            <div>
-
-                <div
-                    id="localScore"
-                    class="local-score"
-                >
-                    --
-                </div>
-
-                <div
-                    id="localCondition"
-                    class="local-condition"
-                >
-                    ACQUIRING
-                </div>
-
-            </div>
-
-            <div class="local-score-caption">
-                NETWORK<br>
-                SCORE
-            </div>
-
-        </div>
-
-
-        <div class="local-metrics">
-
-            <div>
-                <span>
-                    SIGNAL
-                </span>
-
-                <strong
-                    id="localSignal"
-                >
-                    --
-                </strong>
-            </div>
-
-            <div>
-                <span>
-                    LATENCY
-                </span>
-
-                <strong
-                    id="localLatency"
-                >
-                    --
-                </strong>
-            </div>
-
-            <div>
-                <span>
-                    NODES
-                </span>
-
-                <strong
-                    id="localNodes"
-                >
-                    --
-                </strong>
-            </div>
-
-        </div>
-
-
-        <div class="local-anomaly">
-
-            <div class="local-anomaly-label">
-                NEAREST ANOMALY
-            </div>
-
-            <div
-                id="localAnomaly"
-                class="local-anomaly-value"
-            >
-                ANALYZING...
-            </div>
-
-            <div
-                id="localDistance"
-                class="local-distance"
-            >
-                --
-            </div>
-
-        </div>
-
-
-        <div
-            id="localRecommendation"
-            class="local-recommendation"
-        >
-            Acquiring local network intelligence...
-        </div>
-
-    `;
-
-
-    const intelligence =
-        document.querySelector(
-            ".intelligence"
-        );
-
-
-    if (!intelligence) {
-        return;
-    }
-
-
-    const header =
-        intelligence.querySelector(
-            ".intelligence-header"
-        );
-
-
-    if (
-        header &&
-        header.nextElementSibling
-    ) {
-
-        intelligence.insertBefore(
-            panel,
-            header.nextElementSibling
-        );
-
-    }
-    else {
-
-        intelligence.appendChild(
-            panel
-        );
-    }
-}
-
-
-/* ============================================================
-   UPDATE LOCAL INTELLIGENCE
-   ============================================================ */
-
-function updateLocalIntelligence() {
-
-    const panel =
-        $("localIntelligence");
-
-
-    if (!panel) {
-        return;
-    }
-
-
-    if (
-        !userLocation
-    ) {
-
-        setText(
-            "localScore",
-            "--"
-        );
-
-        setText(
-            "localCondition",
-            "GPS REQUIRED"
-        );
-
-        setText(
-            "localSignal",
-            "--"
-        );
-
-        setText(
-            "localLatency",
-            "--"
-        );
-
-        setText(
-            "localNodes",
-            "--"
-        );
-
-        setText(
-            "localAnomaly",
-            "POSITION REQUIRED"
-        );
-
-        setText(
-            "localDistance",
-            "--"
-        );
-
-        setText(
-            "localRecommendation",
-            "Enable location services to calculate local network intelligence."
-        );
-
-        return;
-    }
-
-
-    const local =
-        calculateLocalIntelligence();
-
-
-    if (!local) {
-        return;
-    }
-
-
-    setText(
-        "localScore",
-        local.score
-    );
-
-
-    setText(
-        "localCondition",
-        local.classification.label
-    );
-
-
-    setText(
-        "localSignal",
-        `${local.signal} dBm`
-    );
-
-
-    setText(
-        "localLatency",
-        `${local.latency} ms`
-    );
-
-
-    setText(
-        "localNodes",
-        local.nodes
-    );
-
-
-    const condition =
-        $("localCondition");
-
-
-    if (condition) {
-
-        condition.style.color =
-            local.classification.color;
-    }
-
-
-    if (
-        local.nearestDeadZone
-    ) {
-
-        const zone =
-            local.nearestDeadZone;
-
-
-        setText(
-            "localAnomaly",
-            zone.id
-        );
-
-
-        setText(
-            "localDistance",
-            formatDistance(
-                zone.distance
-            )
-        );
-
-    }
-    else {
-
-        setText(
-            "localAnomaly",
-            "NONE DETECTED"
-        );
-
-        setText(
-            "localDistance",
-            "CLEAR"
-        );
-    }
-
-
-    let recommendation;
-
-
-    if (
-        local.score >= 80
-    ) {
-
-        recommendation =
-            "Excellent local connectivity detected. No immediate intervention required.";
-
-    }
-    else if (
-        local.score >= 60
-    ) {
-
-        recommendation =
-            "Local connectivity is stable with minor performance variation.";
-
-    }
-    else if (
-        local.score >= 40
-    ) {
-
-        recommendation =
-            "Moderate degradation detected. Monitor nearby network conditions.";
-
-    }
-    else {
-
-        recommendation =
-            "Poor local connectivity detected. A nearby coverage anomaly may affect service.";
-    }
-
-
-    if (
-        local.nearestDeadZone &&
-        local.nearestDeadZone.distance <
-        500
-    ) {
-
-        recommendation +=
-            ` Nearest dead zone is ${formatDistance(
-                local.nearestDeadZone.distance
-            )} away.`;
-    }
-
-
-    setText(
-        "localRecommendation",
-        recommendation
-    );
-}
-
-
-/* ============================================================
-   DISTANCE FORMAT
-   ============================================================ */
-
-function formatDistance(
-    meters
-) {
-
-    if (
-        meters < 1000
-    ) {
-
-        return `${Math.round(
-            meters
-        )} m`;
-    }
-
-
-    return `${(
-        meters / 1000
-    ).toFixed(2)} km`;
-}
-
-
-/* ============================================================
-   DASHBOARD
-   ============================================================ */
-
-function updateDashboard(
-    dataset
-) {
-
-    if (!dataset.length) {
-        return;
-    }
-
-
-    const averageSignal =
-        dataset.reduce(
-            (sum, point) =>
-                sum + point.signal,
-            0
-        ) /
-        dataset.length;
-
-
-    const averageDownload =
-        dataset.reduce(
-            (sum, point) =>
-                sum + point.download,
-            0
-        ) /
-        dataset.length;
-
-
-    const averageLatency =
-        dataset.reduce(
-            (sum, point) =>
-                sum + point.latency,
-            0
-        ) /
-        dataset.length;
-
-
-    const averageScore =
-        dataset.reduce(
-            (sum, point) =>
-                sum + point.score,
-            0
-        ) /
-        dataset.length;
-
-
-    const stability =
-        Math.max(
-            0,
-            Math.min(
-                100,
-                Math.round(
-                    100 -
-                    Math.abs(
-                        averageLatency -
-                        45
-                    ) *
-                    0.55
-                )
-            )
-        );
-
-
-    setText(
-        "signalValue",
-        Math.round(
-            averageSignal
-        )
-    );
-
-
-    setText(
-        "downloadValue",
-        averageDownload.toFixed(1)
-    );
-
-
-    setText(
-        "latencyValue",
-        Math.round(
-            averageLatency
-        )
-    );
-
-
-    setText(
-        "stabilityValue",
-        stability
-    );
-
-
-    setText(
-        "networkScore",
-        Math.round(
-            averageScore
-        )
-    );
-
-
-    setText(
-        "measurementCount",
-        dataset.length
-    );
-
-
-    setText(
-        "deadZoneCount",
-        String(
-            deadZones.length
-        ).padStart(
-            2,
-            "0"
-        )
-    );
-
-
-    updateCoreStatus(
-        Math.round(
-            averageScore
-        )
-    );
-
-
-    updateCoordinates(
-        dataset
-    );
-
-
-    updateTelemetry(
-        averageSignal,
-        averageDownload,
-        averageLatency,
-        stability
-    );
-}
-
-
-/* ============================================================
-   CORE
-   ============================================================ */
-
-function updateCoreStatus(
-    score
-) {
-
-    let status =
-        "OPTIMAL";
-
-
-    if (score < 40) {
-
-        status =
-            "CRITICAL";
-
-    }
-    else if (score < 60) {
-
-        status =
-            "DEGRADED";
-
-    }
-    else if (score < 80) {
-
-        status =
-            "STABLE";
-    }
-
-
-    setText(
-        "coreStatus",
-        status
-    );
-
-
-    const core =
-        document.querySelector(
-            ".network-core"
-        );
-
-
-    if (!core) {
-        return;
-    }
-
-
-    core.classList.remove(
-        "core-optimal",
-        "core-stable",
-        "core-degraded",
-        "core-critical"
-    );
-
-
-    core.classList.add(
-        `core-${status.toLowerCase()}`
-    );
-}
-
-
-/* ============================================================
-   COORDINATES
-   ============================================================ */
-
-function updateCoordinates(
-    dataset
-) {
-
-    if (
-        userLocation
-    ) {
-
-        setText(
-            "mapLatitude",
-            userLocation.latitude.toFixed(4)
-        );
-
-
-        setText(
-            "mapLongitude",
-            userLocation.longitude.toFixed(4)
-        );
-
-
-        setText(
-            "activeRegion",
-            `${userLocation.latitude.toFixed(4)}° N`
-        );
-
-
-        setText(
-            "activeLongitude",
-            `${userLocation.longitude.toFixed(4)}° E`
-        );
-
-
-        return;
-    }
-
-
-    if (!dataset.length) {
-        return;
-    }
-
-
-    const latitude =
-        dataset.reduce(
-            (sum, point) =>
-                sum + point.latitude,
-            0
-        ) /
-        dataset.length;
-
-
-    const longitude =
-        dataset.reduce(
-            (sum, point) =>
-                sum + point.longitude,
-            0
-        ) /
-        dataset.length;
-
-
-    setText(
-        "mapLatitude",
-        latitude.toFixed(4)
-    );
-
-
-    setText(
-        "mapLongitude",
-        longitude.toFixed(4)
-    );
-}
-
-
-/* ============================================================
-   TELEMETRY
-   ============================================================ */
-
-function updateTelemetry(
-    signal,
-    download,
-    latency,
-    stability
-) {
-
-    const signalQuality =
-        Math.round(
-            normalizeSignal(
-                signal
-            )
-        );
-
-
-    const downloadQuality =
-        Math.round(
-            normalizeDownload(
-                download
-            )
-        );
-
-
-    const latencyQuality =
-        Math.round(
-            normalizeLatency(
-                latency
-            )
-        );
-
-
-    const bars = [
-
-        [
-            "signalBar",
-            signalQuality
-        ],
-
-        [
-            "downloadBar",
-            downloadQuality
-        ],
-
-        [
-            "latencyBar",
-            latencyQuality
-        ],
-
-        [
-            "stabilityBar",
-            stability
-        ]
-
-    ];
-
-
-    bars.forEach(
-        ([id, value]) => {
-
-            const bar =
-                $(id);
-
-            if (bar) {
-
-                bar.style.width =
-                    `${value}%`;
-            }
-        }
-    );
-
-
-    setText(
-        "signalQuality",
-        `${signalQuality}%`
-    );
-
-
-    setText(
-        "downloadQuality",
-        `${downloadQuality}%`
-    );
-
-
-    setText(
-        "latencyQuality",
-        `${latencyQuality}%`
-    );
-
-
-    setText(
-        "stabilityQuality",
-        `${stability}%`
-    );
-}
-
-
-/* ============================================================
-   INTELLIGENCE
-   ============================================================ */
-
-function updateIntelligence(
-    dataset
-) {
-
-    if (!dataset.length) {
-        return;
-    }
-
-
-    const worst =
-        [...dataset].sort(
-            (a, b) =>
-                a.score -
-                b.score
-        )[0];
-
-
-    setText(
-        "statusLabel",
-        worst.classification.label
-    );
-
-
-    setText(
-        "statusDescription",
-        `${dataset.filter(
-            point =>
-                point.score <
-                CONFIG.deadZoneThreshold
-        ).length} critical measurement points detected across the active analysis region.`
-    );
-
-
-    setText(
-        "anomalyTitle",
-        worst.diagnosis.title
-    );
-
-
-    setText(
-        "anomalySector",
-        `NODE ${worst.id}`
-    );
-
-
-    setText(
-        "anomalySignal",
-        `${worst.signal} dBm`
-    );
-
-
-    setText(
-        "anomalyConfidence",
-        `${worst.confidence}%`
-    );
-
-
-    setText(
-        "diagnosisTitle",
-        worst.diagnosis.title
-    );
-
-
-    setText(
-        "diagnosisDescription",
-        worst.diagnosis.description
-    );
-
-
-    updateRecommendation(
-        worst
-    );
-}
-
-
-/* ============================================================
-   SELECTED INTELLIGENCE
-   ============================================================ */
-
-function updateSelectedIntelligence(
-    point
-) {
-
-    setText(
-        "statusLabel",
-        point.classification.label
-    );
-
-
-    setText(
-        "statusDescription",
-        `Node ${point.id} selected for detailed network analysis.`
-    );
-
-
-    setText(
-        "anomalyTitle",
-        point.diagnosis.title
-    );
-
-
-    setText(
-        "anomalySector",
-        `NODE ${point.id}`
-    );
-
-
-    setText(
-        "anomalySignal",
-        `${point.signal} dBm`
-    );
-
-
-    setText(
-        "anomalyConfidence",
-        `${point.confidence}%`
-    );
-
-
-    setText(
-        "diagnosisTitle",
-        point.diagnosis.title
-    );
-
-
-    setText(
-        "diagnosisDescription",
-        point.diagnosis.description
-    );
-
-
-    updateRecommendation(
-        point
-    );
-}
-
-
-/* ============================================================
-   RECOMMENDATION
-   ============================================================ */
-
-function updateRecommendation(
-    point
-) {
-
-    let recommendation =
-        "Network conditions within expected operational parameters.";
-
-
-    if (
-        point.score <
-        CONFIG.deadZoneThreshold
-    ) {
-
-        recommendation =
-            "Immediate investigation recommended for this network anomaly.";
-
-    }
-    else if (
-        point.latency >= 120
-    ) {
-
-        recommendation =
-            "Investigate routing congestion or upstream network delay.";
-
-    }
-    else if (
-        point.signal <= -100
-    ) {
-
-        recommendation =
-            "Investigate coverage gaps, obstruction or access-point placement.";
-
-    }
-    else if (
-        point.download <= 12
-    ) {
-
-        recommendation =
-            "Investigate bandwidth saturation or local network congestion.";
-    }
-
-
-    setText(
-        "recommendationText",
-        recommendation
-    );
-}
-
-
-/* ============================================================
-   EVENTS
-   ============================================================ */
-
-function addEvent(
-    type,
-    message,
-    status = "ANALYSIS"
-) {
-
-    const list =
-        $("eventList");
-
-
-    if (!list) {
-        return;
-    }
-
-
-    const time =
-        new Date().toLocaleTimeString(
-            "en-IN",
-            {
-                hour12:
-                    false
-            }
-        );
-
-
-    const row =
-        document.createElement(
-            "div"
-        );
-
-
-    row.className =
-        "event-row";
-
-
-    row.innerHTML = `
-
-        <span class="event-time">
-            ${time}
-        </span>
-
-        <span class="event-type">
-            ${type}
-        </span>
-
-        <span class="event-message">
-            ${message}
-        </span>
-
-        <span class="event-status">
-            ${status}
-        </span>
-
-    `;
-
-
-    list.prepend(
-        row
-    );
-
-
-    while (
-        list.children.length >
-        5
-    ) {
-
-        list.removeChild(
-            list.lastChild
-        );
-    }
-}
-
-
-/* ============================================================
-   RENDER
-   ============================================================ */
-
-function renderSystem() {
-
-    const filtered =
-        getFilteredData();
-
-
-    renderMarkers(
-        filtered
-    );
-
-
-    const zones =
-        deadZones.filter(
-            zone => {
-
-                if (
-                    currentFilter ===
-                    "ALL"
-                ) {
-
-                    return true;
-                }
-
-
-                return zone.points.some(
-                    point =>
-                        point.network.toUpperCase() ===
-                        currentFilter
-                );
-            }
-        );
-
-
-    renderDeadZones(
-        zones
-    );
-
-
-    updateDashboard(
-        filtered
-    );
-
-
-    updateIntelligence(
-        filtered
-    );
-
-
-    updateLocalIntelligence();
-}
-
-
-/* ============================================================
-   FILTERS
-   ============================================================ */
-
-function initializeFilters() {
-
-    const buttons =
-        document.querySelectorAll(
-            "[data-network]"
-        );
-
-
-    buttons.forEach(
-        button => {
-
-            button.addEventListener(
-                "click",
-                () => {
-
-                    buttons.forEach(
-                        item =>
-                            item.classList.remove(
-                                "active"
-                            )
-                    );
-
-
-                    button.classList.add(
-                        "active"
-                    );
-
-
-                    currentFilter =
-                        button.dataset.network
-                            .toUpperCase();
-
-
-                    addEvent(
-                        "FILTER",
-                        `Network filter switched to ${currentFilter}`,
-                        "ACTIVE"
-                    );
-
-
-                    renderSystem();
-                }
-            );
-        }
-    );
-}
-
-
-/* ============================================================
-   SCAN
-   ============================================================ */
-
-function initiateScan() {
-
-    if (
-        scanInProgress
-    ) {
-        return;
-    }
-
-
-    scanInProgress =
-        true;
-
-
-    const button =
-        $("scanButton");
-
-
-    if (button) {
-
-        button.disabled =
+        state.scanning =
             true;
 
-        button.innerHTML =
-            "◉ &nbsp; SCANNING...";
-    }
+        const button =
+            $("scanButton");
 
+        if (button) {
 
-    addEvent(
-        "SCAN",
-        "Spatial network scan initiated",
-        "RUNNING"
-    );
+            button.disabled =
+                true;
 
+            button.classList.add(
+                "scanning"
+            );
 
-    setTimeout(
-        () => {
+            button.innerHTML = `
+                <span class="scan-button-icon">
+                    ◉
+                </span>
+                SCANNING...
+            `;
+        }
 
-            processMeasurements();
+        const phases = [
+            [
+                "SCAN",
+                "Spatial network scan initiated",
+                "RUNNING"
+            ],
 
-
-            deadZones =
-                detectDeadZones(
-                    processedMeasurements
-                );
-
-
-            renderSystem();
-
-
-            addEvent(
-                "ANALYSIS",
-                "Local network intelligence recalculated",
+            [
+                "DATA",
+                `${state.filteredData.length} network measurements acquired`,
                 "READY"
-            );
+            ],
 
-
-            addEvent(
-                "ANOMALY",
-                `${deadZones.length} persistent zones confirmed`,
+            [
+                "ANALYSIS",
+                `${buildDeadZoneClusters(state.filteredData).length} persistent dead-zone clusters detected`,
                 "ANALYSIS"
-            );
+            ],
 
+            [
+                "SYSTEM",
+                "Local network intelligence recalculated",
+                "UPDATED"
+            ],
 
-            addEvent(
+            [
                 "SCAN",
                 "Spatial network scan completed",
-                `${processedMeasurements.length} PTS`
-            );
+                `${calculateGlobalScore()} PTS`
+            ]
+        ];
 
+        let index = 0;
 
-            if (button) {
+        const executePhase =
+            () => {
 
-                button.disabled =
-                    false;
-
-                button.innerHTML =
-                    "◉ &nbsp; INITIATE SCAN";
-            }
-
-
-            scanInProgress =
-                false;
-
-        },
-
-        900
-    );
-}
-
-
-/* ============================================================
-   NAVIGATION
-   ============================================================ */
-
-function initializeNavigation() {
-
-    const items =
-        document.querySelectorAll(
-            ".command-item"
-        );
-
-
-    items.forEach(
-        item => {
-
-            item.addEventListener(
-                "click",
-                () => {
-
-                    items.forEach(
-                        nav =>
-                            nav.classList.remove(
-                                "active"
-                            )
-                    );
-
-
-                    item.classList.add(
-                        "active"
-                    );
-
-
-                    const target =
-                        item.dataset.target;
-
-
-                    if (
-                        target ===
-                        "map"
-                    ) {
-
-                        networkMap.invalidateSize();
-                    }
-
-
-                    addEvent(
-                        "NAV",
-                        `Command interface switched to ${target.toUpperCase()}`,
-                        "READY"
-                    );
+                if (
+                    index >=
+                    phases.length
+                ) {
+                    finishScan();
+                    return;
                 }
-            );
-        }
-    );
-}
 
+                const [
+                    type,
+                    message,
+                    status
+                ] =
+                    phases[index];
 
-/* ============================================================
-   CLOCK
-   ============================================================ */
+                addEvent(
+                    type,
+                    message,
+                    status,
 
-function initializeClock() {
+                    type ===
+                    "ANALYSIS"
+                        ? "warning"
+                        : "info"
+                );
 
-    const clock =
-        $("systemTime");
+                if (
+                    index === 0
+                ) {
+                    animateMapScan();
+                }
 
+                index++;
 
-    if (!clock) {
-        return;
+                state.scanTimer =
+                    setTimeout(
+                        executePhase,
+                        650
+                    );
+            };
+
+        executePhase();
     }
 
+    function finishScan() {
+        state.scanning =
+            false;
 
-    const update =
-        () => {
+        const button =
+            $("scanButton");
 
-            clock.textContent =
+        if (button) {
+
+            button.disabled =
+                false;
+
+            button.classList.remove(
+                "scanning"
+            );
+
+            button.innerHTML = `
+                <span class="scan-button-icon">
+                    ◉
+                </span>
+                INITIATE SCAN
+            `;
+        }
+
+        renderMarkers();
+
+        updateGlobalMetrics();
+
+        if (
+            state.userLocation
+        ) {
+            updateLocalIntelligence(
+                state.userLocation.lat,
+                state.userLocation.lon
+            );
+        }
+
+        addEvent(
+            "SYSTEM",
+            "Spatial intelligence engine synchronized",
+            "ONLINE",
+            "success"
+        );
+    }
+
+    function animateMapScan() {
+        if (!state.map) {
+            return;
+        }
+
+        const center =
+            state.userLocation
+                ? [
+                    state.userLocation.lat,
+                    state.userLocation.lon
+                ]
+                : getDatasetCenter();
+
+        const scanCircle =
+            L.circle(
+                center,
+                {
+                    radius: 50,
+
+                    color:
+                        COLORS.cyan,
+
+                    weight: 2,
+
+                    opacity: 0.85,
+
+                    fillOpacity: 0,
+
+                    interactive:
+                        false
+                }
+            ).addTo(
+                state.map
+            );
+
+        let radius = 50;
+
+        const interval =
+            setInterval(
+                () => {
+
+                    radius += 80;
+
+                    scanCircle.setRadius(
+                        radius
+                    );
+
+                    if (
+                        radius >=
+                        1300
+                    ) {
+                        clearInterval(
+                            interval
+                        );
+
+                        state.map.removeLayer(
+                            scanCircle
+                        );
+                    }
+
+                },
+                90
+            );
+    }
+
+    /* =====================================================
+       EVENT STREAM
+       ===================================================== */
+
+    function addEvent(
+        type,
+        message,
+        status,
+        severity = "info"
+    ) {
+        state.events.unshift({
+            timestamp:
                 new Date().toLocaleTimeString(
-                    "en-IN",
+                    "en-GB",
                     {
                         hour12:
                             false
                     }
-                );
-        };
+                ),
 
+            type,
 
-    update();
+            message,
 
+            status,
 
-    setInterval(
-        update,
-        1000
-    );
-}
+            severity
+        });
 
+        state.events =
+            state.events.slice(
+                0,
+                7
+            );
 
-/* ============================================================
-   INITIALIZE
-   ============================================================ */
+        renderEvents();
+    }
 
-function initializeSystem() {
+    function renderEvents() {
+        const container =
+            $("eventList");
 
-    processMeasurements();
+        if (!container) {
+            return;
+        }
 
+        container.innerHTML =
+            state.events
+                .map(
+                    event => `
+                        <div class="event-item ${event.severity}">
 
-    deadZones =
-        detectDeadZones(
-            processedMeasurements
+                            <div class="event-time">
+                                ${event.timestamp}
+                            </div>
+
+                            <div class="event-dot"></div>
+
+                            <div class="event-message">
+
+                                <strong>
+                                    ${event.type}
+                                </strong>
+
+                                <span>
+                                    ${event.message}
+                                </span>
+
+                                <strong>
+                                    ${event.status}
+                                </strong>
+
+                            </div>
+
+                        </div>
+                    `
+                )
+                .join("");
+    }
+
+    function seedEvents() {
+        state.events = [];
+
+        addEvent(
+            "SYSTEM",
+            "NĀDI spatial intelligence engine initialized",
+            "ONLINE",
+            "success"
         );
 
+        addEvent(
+            "DATA",
+            `${enrichedData.length} network measurements loaded`,
+            "READY",
+            "info"
+        );
 
-    initializeMap();
+        addEvent(
+            "ANALYSIS",
+            `${buildDeadZoneClusters(enrichedData).length} persistent dead-zone clusters detected`,
+            "READY",
+            "warning"
+        );
 
-
-    initializeFilters();
-
-
-    initializeNavigation();
-
-
-    initializeClock();
-
-
-    createLocalIntelligencePanel();
-
-
-    renderSystem();
-
-
-    const scanButton =
-        $("scanButton");
-
-
-    if (scanButton) {
-
-        scanButton.addEventListener(
-            "click",
-            initiateScan
+        addEvent(
+            "GPS",
+            "Location services initialized",
+            "READY",
+            "success"
         );
     }
 
+    /* =====================================================
+       COMMAND RAIL
+       ===================================================== */
 
-    addEvent(
-        "SYSTEM",
-        "NEXUS spatial intelligence engine initialized",
-        "ONLINE"
-    );
+    function scrollToSection(
+        target
+    ) {
+        const workspace =
+            document.querySelector(
+                ".command-workspace"
+            );
 
+        const element =
+            typeof target === "string"
+                ? $(target)
+                : target;
 
-    addEvent(
-        "DATA",
-        `${processedMeasurements.length} network measurements loaded`,
-        "READY"
-    );
+        if (
+            !workspace ||
+            !element
+        ) {
+            return;
+        }
 
+        workspace.scrollTo({
+            top:
+                element.offsetTop -
+                15,
 
-    addEvent(
-        "ANALYSIS",
-        `${deadZones.length} persistent dead-zone clusters detected`,
-        "READY"
-    );
+            behavior:
+                "smooth"
+        });
+    }
 
+    function focusDeadZones() {
+        const deadPoints =
+            state.filteredData.filter(
+                point =>
+                    point.quality ===
+                    "dead"
+            );
 
-    setTimeout(
-        () => {
+        if (
+            !deadPoints.length ||
+            !state.map
+        ) {
 
-            networkMap.invalidateSize();
+            addEvent(
+                "ANALYSIS",
+                "No dead-zone measurements in active filter",
+                "CLEAR",
+                "success"
+            );
 
-        },
+            return;
+        }
 
-        300
-    );
-}
+        const bounds =
+            L.latLngBounds(
+                deadPoints.map(
+                    point => [
+                        Number(
+                            point.latitude
+                        ),
 
+                        Number(
+                            point.longitude
+                        )
+                    ]
+                )
+            );
 
-/* ============================================================
-   START
-   ============================================================ */
+        state.map.fitBounds(
+            bounds,
+            {
+                padding: [
+                    40,
+                    40
+                ],
 
-document.addEventListener(
-    "DOMContentLoaded",
-    initializeSystem
-);
+                maxZoom:
+                    16,
+
+                animate:
+                    true
+            }
+        );
+
+        addEvent(
+            "ANALYSIS",
+            `${deadPoints.length} dead-zone measurements isolated`,
+            "FOCUSED",
+            "warning"
+        );
+    }
+
+    function initializeCommandRail() {
+        document
+            .querySelectorAll(
+                ".command-item"
+            )
+            .forEach(
+                button => {
+
+                    button.addEventListener(
+                        "click",
+                        () => {
+
+                            document
+                                .querySelectorAll(
+                                    ".command-item"
+                                )
+                                .forEach(
+                                    item =>
+                                        item.classList.remove(
+                                            "active"
+                                        )
+                                );
+
+                            button.classList.add(
+                                "active"
+                            );
+
+                            const target =
+                                button.dataset
+                                    .target;
+
+                            if (
+                                target ===
+                                "map"
+                            ) {
+                                scrollToSection(
+                                    "networkMap"
+                                );
+                            }
+
+                            if (
+                                target ===
+                                "telemetry"
+                            ) {
+                                scrollToSection(
+                                    document.querySelector(
+                                        ".telemetry-section"
+                                    )
+                                );
+                            }
+
+                            if (
+                                target ===
+                                "events"
+                            ) {
+                                scrollToSection(
+                                    document.querySelector(
+                                        ".event-section"
+                                    )
+                                );
+                            }
+
+                            if (
+                                target ===
+                                "dead-zones"
+                            ) {
+                                focusDeadZones();
+                            }
+
+                            addEvent(
+                                "NAV",
+                                `Command interface switched to ${target.toUpperCase()}`,
+                                "READY",
+                                "info"
+                            );
+                        }
+                    );
+                }
+            );
+    }
+
+    /* =====================================================
+       FILTER INITIALIZATION
+       ===================================================== */
+
+    function initializeFilters() {
+        document
+            .querySelectorAll(
+                ".network-filters button"
+            )
+            .forEach(
+                button => {
+
+                    button.addEventListener(
+                        "click",
+                        () => {
+
+                            setNetworkFilter(
+                                button.dataset
+                                    .network ||
+                                "all"
+                            );
+                        }
+                    );
+                }
+            );
+    }
+
+    /* =====================================================
+       SYSTEM CLOCK
+       ===================================================== */
+
+    function startClock() {
+        const updateClock =
+            () => {
+
+                setText(
+                    "systemTime",
+
+                    new Date().toLocaleTimeString(
+                        "en-GB",
+                        {
+                            hour12:
+                                false
+                        }
+                    )
+                );
+            };
+
+        updateClock();
+
+        setInterval(
+            updateClock,
+            1000
+        );
+    }
+
+    /* =====================================================
+       INITIAL LOCAL STATE
+       ===================================================== */
+
+    function initializeLocalState() {
+        const center =
+            getDatasetCenter();
+
+        updateLocalIntelligence(
+            center[0],
+            center[1]
+        );
+
+        updateGlobalMetrics();
+    }
+
+    /* =====================================================
+       INITIALIZATION
+       ===================================================== */
+
+    function initialize() {
+        if (
+            !DATA.length
+        ) {
+
+            console.warn(
+                "NĀDI: networkData is unavailable."
+            );
+
+            return;
+        }
+
+        startClock();
+
+        initializeMap();
+
+        initializeLocateMeButton();
+
+        initializeFilters();
+
+        initializeCommandRail();
+
+        seedEvents();
+
+        initializeLocalState();
+
+        startTelemetryPulse();
+
+        const scanButton =
+            $("scanButton");
+
+        if (scanButton) {
+
+            scanButton.addEventListener(
+                "click",
+                runScan
+            );
+        }
+
+        /*
+         * Automatically request GPS after
+         * the dashboard has rendered.
+         *
+         * If permission is denied,
+         * the dataset center is used.
+         */
+
+        setTimeout(
+            () => {
+                requestUserLocation(
+                    false
+                );
+            },
+            500
+        );
+    }
+
+    /* =====================================================
+       BOOT
+       ===================================================== */
+
+    if (
+        document.readyState ===
+        "loading"
+    ) {
+
+        document.addEventListener(
+            "DOMContentLoaded",
+            initialize
+        );
+
+    } else {
+
+        initialize();
+    }
+
+})();
