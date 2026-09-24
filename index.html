@@ -1,0 +1,1317 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>
+        NĀDI — Spatial Network Intelligence
+    </title>
+
+    <link
+        rel="preconnect"
+        href="https://fonts.googleapis.com"
+    >
+
+    <link
+        rel="preconnect"
+        href="https://fonts.googleapis.com"
+        crossorigin
+    >
+
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet"
+    >
+
+    <link
+        rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    >
+
+    <link
+        rel="stylesheet"
+        href="style.css"
+    >
+
+</head>
+
+
+<body>
+
+
+<!-- =========================================================
+     AMBIENT HUD
+     ========================================================= -->
+
+<div class="hud-noise"></div>
+<div class="hud-vignette"></div>
+
+
+<!-- =========================================================
+     TOP COMMAND BAR
+     ========================================================= -->
+
+<header class="topbar">
+
+
+    <div class="brand-block">
+
+        <div class="brand-symbol">
+
+            <span></span>
+
+        </div>
+
+
+        <div class="brand-copy">
+
+            <div class="brand-name">
+                NĀDI
+            </div>
+
+            <div class="brand-subtitle">
+                SPATIAL NETWORK INTELLIGENCE
+            </div>
+
+        </div>
+
+    </div>
+
+
+
+    <div class="top-system-status">
+
+        <div class="system-state">
+
+            <span class="state-dot"></span>
+
+            <span>
+                SYSTEM ONLINE
+            </span>
+
+        </div>
+
+
+        <div class="top-divider"></div>
+
+
+        <div>
+            NODE
+            <strong>
+                ND-042
+            </strong>
+        </div>
+
+
+        <div class="top-divider"></div>
+
+
+        <div>
+            MODE
+            <strong class="cyan">
+                ANALYSIS
+            </strong>
+        </div>
+
+    </div>
+
+
+
+    <div class="top-actions">
+
+        <div class="live-status">
+
+            <span></span>
+
+            LIVE
+
+        </div>
+
+
+        <div
+            id="systemTime"
+            class="system-time"
+        >
+            --:--:--
+        </div>
+
+
+        <button
+            id="scanButton"
+            class="scan-button"
+            type="button"
+        >
+
+            <span class="scan-button-icon">
+                ◉
+            </span>
+
+            INITIATE SCAN
+
+        </button>
+
+    </div>
+
+</header>
+
+
+
+<!-- =========================================================
+     MAIN APPLICATION
+     ========================================================= -->
+
+<main class="application-shell">
+
+
+<!-- =========================================================
+     LEFT COMMAND RAIL
+     ========================================================= -->
+
+<aside class="command-rail">
+
+
+    <div class="rail-heading">
+        COMMAND
+    </div>
+
+
+    <button
+        class="command-item active"
+        data-target="map"
+        type="button"
+    >
+
+        <span class="command-index">
+            01
+        </span>
+
+        <span class="command-icon">
+            ◈
+        </span>
+
+        <span class="command-label">
+            NETWORK MAP
+        </span>
+
+    </button>
+
+
+    <button
+        class="command-item"
+        data-target="telemetry"
+        type="button"
+    >
+
+        <span class="command-index">
+            02
+        </span>
+
+        <span class="command-icon">
+            ≋
+        </span>
+
+        <span class="command-label">
+            TELEMETRY
+        </span>
+
+    </button>
+
+
+    <button
+        class="command-item"
+        data-target="dead-zones"
+        type="button"
+    >
+
+        <span class="command-index">
+            03
+        </span>
+
+        <span class="command-icon">
+            ◇
+        </span>
+
+        <span class="command-label">
+            DEAD ZONES
+        </span>
+
+    </button>
+
+
+    <button
+        class="command-item"
+        data-target="event-log"
+        type="button"
+    >
+
+        <span class="command-index">
+            04
+        </span>
+
+        <span class="command-icon">
+            ≡
+        </span>
+
+        <span class="command-label">
+            EVENT LOG
+        </span>
+
+    </button>
+
+
+
+    <div class="rail-section">
+
+        <div class="rail-heading">
+            SYSTEM STATUS
+        </div>
+
+
+        <div class="system-check">
+
+            <span class="check-indicator"></span>
+
+            <span>
+                GPS SENSOR
+            </span>
+
+            <strong>
+                READY
+            </strong>
+
+        </div>
+
+
+        <div class="system-check">
+
+            <span class="check-indicator"></span>
+
+            <span>
+                NETWORK API
+            </span>
+
+            <strong>
+                READY
+            </strong>
+
+        </div>
+
+
+        <div class="system-check">
+
+            <span class="check-indicator"></span>
+
+            <span>
+                DATA ENGINE
+            </span>
+
+            <strong>
+                READY
+            </strong>
+
+        </div>
+
+
+        <div class="system-check warning">
+
+            <span class="check-indicator"></span>
+
+            <span>
+                ML ENGINE
+            </span>
+
+            <strong>
+                STANDBY
+            </strong>
+
+        </div>
+
+    </div>
+
+
+
+    <div class="rail-location">
+
+        <div class="rail-heading">
+            ACTIVE LOCATION
+        </div>
+
+
+        <div
+            id="activeRegion"
+            class="rail-coordinate"
+        >
+            12.9716° N
+        </div>
+
+
+        <div
+            id="activeLongitude"
+            class="rail-coordinate"
+        >
+            77.5946° E
+        </div>
+
+
+        <div class="rail-version">
+            NĀDI CORE // v2.0.26
+        </div>
+
+    </div>
+
+</aside>
+
+
+
+<!-- =========================================================
+     CENTRAL COMMAND WORKSPACE
+     ========================================================= -->
+
+<section class="command-workspace">
+
+
+    <!-- WORKSPACE HEADER -->
+
+    <div class="workspace-header">
+
+
+        <div>
+
+            <div class="eyebrow">
+                SPATIAL NETWORK ANALYSIS
+            </div>
+
+
+            <h1>
+                Connectivity Intelligence
+            </h1>
+
+
+            <p>
+                Monitor network quality, identify coverage anomalies,
+                and understand connectivity across your surroundings.
+            </p>
+
+        </div>
+
+
+
+        <div class="network-filter-panel">
+
+            <div class="filter-label">
+                NETWORK SOURCE
+            </div>
+
+
+            <div class="network-filters">
+
+                <button
+                    class="active"
+                    data-network="all"
+                >
+                    ALL
+                </button>
+
+                <button
+                    data-network="5G"
+                >
+                    5G
+                </button>
+
+                <button
+                    data-network="4G"
+                >
+                    4G
+                </button>
+
+                <button
+                    data-network="Wi-Fi"
+                >
+                    WI-FI
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+
+    <!-- =====================================================
+         MAP COMMAND DISPLAY
+         ===================================================== -->
+
+    <div
+        id="networkMap"
+        class="network-map"
+    >
+
+
+        <!-- MAP TOP LEFT -->
+
+        <div class="map-status-card">
+
+            <div class="map-status-dot"></div>
+
+            <div>
+
+                <span>
+                    SPATIAL GRID
+                </span>
+
+                <strong>
+                    ACTIVE
+                </strong>
+
+            </div>
+
+        </div>
+
+
+
+        <!-- MAP TOP RIGHT -->
+
+        <div class="map-legend">
+
+            <div class="legend-title">
+                NETWORK QUALITY
+            </div>
+
+
+            <div class="legend-row">
+
+                <i class="legend-dot excellent"></i>
+
+                <span>
+                    EXCELLENT
+                </span>
+
+            </div>
+
+
+            <div class="legend-row">
+
+                <i class="legend-dot good"></i>
+
+                <span>
+                    GOOD
+                </span>
+
+            </div>
+
+
+            <div class="legend-row">
+
+                <i class="legend-dot weak"></i>
+
+                <span>
+                    WEAK
+                </span>
+
+            </div>
+
+
+            <div class="legend-row">
+
+                <i class="legend-dot dead"></i>
+
+                <span>
+                    DEAD ZONE
+                </span>
+
+            </div>
+
+        </div>
+
+
+
+        <!-- NETWORK CORE -->
+
+        <div class="network-core">
+
+
+            <div class="core-orbit orbit-one"></div>
+
+            <div class="core-orbit orbit-two"></div>
+
+            <div class="core-ring"></div>
+
+
+            <div class="core-content">
+
+                <span>
+                    NETWORK SCORE
+                </span>
+
+                <strong id="networkScore">
+                    49
+                </strong>
+
+                <em id="coreStatus">
+                    STABLE
+                </em>
+
+            </div>
+
+        </div>
+
+
+
+        <!-- MAP COORDINATES -->
+
+        <div class="map-coordinate-card">
+
+            <div>
+
+                <span>
+                    LAT
+                </span>
+
+                <strong id="mapLatitude">
+                    12.9716
+                </strong>
+
+            </div>
+
+
+            <div class="coordinate-divider"></div>
+
+
+            <div>
+
+                <span>
+                    LON
+                </span>
+
+                <strong id="mapLongitude">
+                    77.5946
+                </strong>
+
+            </div>
+
+        </div>
+
+
+    </div>
+
+
+
+    <!-- =====================================================
+         TELEMETRY
+         ===================================================== -->
+
+    <section class="telemetry-section">
+
+
+        <div class="section-header">
+
+            <div>
+
+                <span class="section-number">
+                    01
+                </span>
+
+                <span>
+                    LIVE TELEMETRY
+                </span>
+
+            </div>
+
+
+            <span class="section-live">
+                ● LIVE DATA
+            </span>
+
+        </div>
+
+
+
+        <div class="telemetry-grid">
+
+
+            <div class="telemetry-card">
+
+                <div class="telemetry-card-header">
+
+                    <span>
+                        SIGNAL STRENGTH
+                    </span>
+
+                    <strong>
+                        RF
+                    </strong>
+
+                </div>
+
+
+                <div class="telemetry-value">
+
+                    <span id="signalValue">
+                        -82
+                    </span>
+
+                    <small>
+                        dBm
+                    </small>
+
+                </div>
+
+
+                <div class="telemetry-progress">
+
+                    <span
+                        id="signalBar"
+                        style="width:50%"
+                    ></span>
+
+                </div>
+
+
+                <div class="telemetry-footer">
+
+                    <span>
+                        QUALITY
+                    </span>
+
+                    <strong id="signalQuality">
+                        82%
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+
+            <div class="telemetry-card">
+
+                <div class="telemetry-card-header">
+
+                    <span>
+                        DOWNLOAD SPEED
+                    </span>
+
+                    <strong>
+                        DL
+                    </strong>
+
+                </div>
+
+
+                <div class="telemetry-value">
+
+                    <span id="downloadValue">
+                        40.8
+                    </span>
+
+                    <small>
+                        Mbps
+                    </small>
+
+                </div>
+
+
+                <div class="telemetry-progress">
+
+                    <span
+                        id="downloadBar"
+                        style="width:50%"
+                    ></span>
+
+                </div>
+
+
+                <div class="telemetry-footer">
+
+                    <span>
+                        THROUGHPUT
+                    </span>
+
+                    <strong id="downloadQuality">
+                        74%
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+
+            <div class="telemetry-card">
+
+                <div class="telemetry-card-header">
+
+                    <span>
+                        LATENCY
+                    </span>
+
+                    <strong>
+                        PING
+                    </strong>
+
+                </div>
+
+
+                <div class="telemetry-value">
+
+                    <span id="latencyValue">
+                        72
+                    </span>
+
+                    <small>
+                        ms
+                    </small>
+
+                </div>
+
+
+                <div class="telemetry-progress">
+
+                    <span
+                        id="latencyBar"
+                        style="width:50%"
+                    ></span>
+
+                </div>
+
+
+                <div class="telemetry-footer">
+
+                    <span>
+                        RESPONSE
+                    </span>
+
+                    <strong id="latencyQuality">
+                        91%
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+
+            <div class="telemetry-card">
+
+                <div class="telemetry-card-header">
+
+                    <span>
+                        CONNECTION STABILITY
+                    </span>
+
+                    <strong>
+                        STB
+                    </strong>
+
+                </div>
+
+
+                <div class="telemetry-value">
+
+                    <span id="stabilityValue">
+                        49
+                    </span>
+
+                    <small>
+                        %
+                    </small>
+
+                </div>
+
+
+                <div class="telemetry-progress">
+
+                    <span
+                        id="stabilityBar"
+                        style="width:50%"
+                    ></span>
+
+                </div>
+
+
+                <div class="telemetry-footer">
+
+                    <span>
+                        CONSISTENCY
+                    </span>
+
+                    <strong id="stabilityQuality">
+                        76%
+                    </strong>
+
+                </div>
+
+            </div>
+
+
+        </div>
+
+    </section>
+
+
+
+    <!-- =====================================================
+         EVENT STREAM
+         ===================================================== -->
+
+    <section class="event-section">
+
+
+        <div class="section-header">
+
+            <div>
+
+                <span class="section-number">
+                    02
+                </span>
+
+                <span>
+                    SYSTEM EVENT STREAM
+                </span>
+
+            </div>
+
+
+            <span class="section-live">
+                ● MONITORING
+            </span>
+
+        </div>
+
+
+        <div
+            id="eventList"
+            class="event-list"
+        ></div>
+
+    </section>
+
+
+</section>
+
+
+
+<!-- =========================================================
+     RIGHT INTELLIGENCE PANEL
+     ========================================================= -->
+
+<aside class="intelligence-panel">
+
+
+    <div class="intelligence-heading">
+
+        <div class="eyebrow">
+            INTELLIGENCE ENGINE
+        </div>
+
+
+        <h2>
+            Network Intelligence
+        </h2>
+
+
+        <div class="engine-active">
+
+            <span></span>
+
+            ANALYSIS ENGINE ACTIVE
+
+        </div>
+
+    </div>
+
+
+
+    <!-- CURRENT STATUS -->
+
+    <section class="intel-section">
+
+
+        <div class="intel-label">
+            CURRENT NETWORK STATE
+        </div>
+
+
+        <div class="network-state">
+
+            <div class="state-icon">
+                ◎
+            </div>
+
+
+            <div>
+
+                <div
+                    id="statusLabel"
+                    class="state-title"
+                >
+                    DEGRADED
+                </div>
+
+
+                <p id="statusDescription">
+                    Network analysis active.
+                </p>
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+
+    <!-- LOCAL INTELLIGENCE -->
+
+    <section
+        id="localIntelligence"
+        class="intel-section local-section"
+    >
+
+        <div class="intel-label">
+            LOCAL INTELLIGENCE
+        </div>
+
+
+        <div class="local-score-row">
+
+            <div>
+
+                <div
+                    id="localScore"
+                    class="local-score"
+                >
+                    --
+                </div>
+
+                <div
+                    id="localCondition"
+                    class="local-condition"
+                >
+                    ACQUIRING
+                </div>
+
+            </div>
+
+
+            <div class="local-score-caption">
+                LOCAL<br>
+                SCORE
+            </div>
+
+        </div>
+
+
+        <div class="local-metrics">
+
+            <div>
+
+                <span>
+                    SIGNAL
+                </span>
+
+                <strong id="localSignal">
+                    --
+                </strong>
+
+            </div>
+
+
+            <div>
+
+                <span>
+                    LATENCY
+                </span>
+
+                <strong id="localLatency">
+                    --
+                </strong>
+
+            </div>
+
+
+            <div>
+
+                <span>
+                    NODES
+                </span>
+
+                <strong id="localNodes">
+                    --
+                </strong>
+
+            </div>
+
+        </div>
+
+
+        <div class="local-anomaly">
+
+            <span>
+                NEAREST ANOMALY
+            </span>
+
+            <strong id="localAnomaly">
+                ANALYZING...
+            </strong>
+
+            <small id="localDistance">
+                --
+            </small>
+
+        </div>
+
+
+        <div
+            id="localRecommendation"
+            class="local-recommendation"
+        >
+            Acquiring local network intelligence...
+        </div>
+
+    </section>
+
+
+
+    <!-- PRIMARY ANOMALY -->
+
+    <section class="intel-section">
+
+
+        <div class="intel-label">
+            PRIMARY ANOMALY
+        </div>
+
+
+        <div
+            id="anomalyTitle"
+            class="anomaly-title"
+        >
+            SEVERE CONNECTIVITY DEGRADATION
+        </div>
+
+
+        <div class="anomaly-details">
+
+
+            <div>
+
+                <span>
+                    NODE
+                </span>
+
+                <strong id="anomalySector">
+                    NODE 21
+                </strong>
+
+            </div>
+
+
+            <div>
+
+                <span>
+                    SIGNAL
+                </span>
+
+                <strong id="anomalySignal">
+                    -109 dBm
+                </strong>
+
+            </div>
+
+
+            <div>
+
+                <span>
+                    CONFIDENCE
+                </span>
+
+                <strong id="anomalyConfidence">
+                    97%
+                </strong>
+
+            </div>
+
+        </div>
+
+    </section>
+
+
+
+    <!-- DIAGNOSIS -->
+
+    <section class="intel-section">
+
+
+        <div class="intel-label">
+            DIAGNOSTIC ANALYSIS
+        </div>
+
+
+        <div class="diagnosis-box">
+
+            <div
+                id="diagnosisTitle"
+                class="diagnosis-title"
+            >
+                SEVERE CONNECTIVITY DEGRADATION
+            </div>
+
+
+            <p
+                id="diagnosisDescription"
+            >
+                Multiple network indicators are significantly degraded.
+            </p>
+
+        </div>
+
+    </section>
+
+
+
+    <!-- RECOMMENDATION -->
+
+    <section class="intel-section">
+
+
+        <div class="intel-label">
+            SYSTEM RECOMMENDATION
+        </div>
+
+
+        <div
+            id="recommendationText"
+            class="recommendation-box"
+        >
+            Immediate investigation recommended for this network anomaly.
+        </div>
+
+    </section>
+
+
+
+    <!-- SYSTEM METRICS -->
+
+    <section class="intel-section">
+
+
+        <div class="intel-label">
+            SYSTEM METRICS
+        </div>
+
+
+        <div class="system-metrics">
+
+
+            <div>
+
+                <span>
+                    MEASUREMENTS
+                </span>
+
+                <strong id="measurementCount">
+                    60
+                </strong>
+
+            </div>
+
+
+            <div>
+
+                <span>
+                    DEAD ZONES
+                </span>
+
+                <strong id="deadZoneCount">
+                    03
+                </strong>
+
+            </div>
+
+
+            <div>
+
+                <span>
+                    COVERAGE
+                </span>
+
+                <strong>
+                    35%
+                </strong>
+
+            </div>
+
+
+        </div>
+
+    </section>
+
+</aside>
+
+</main>
+
+
+
+<!-- =========================================================
+     FOOTER
+     ========================================================= -->
+
+<footer class="system-footer">
+
+
+    <div class="footer-status">
+
+        <span class="footer-dot"></span>
+
+        SYSTEM OPERATIONAL
+
+    </div>
+
+
+    <div>
+        DATA ENGINE ONLINE
+    </div>
+
+
+    <div>
+        SPATIAL ANALYSIS ACTIVE
+    </div>
+
+
+    <div class="footer-right">
+        NĀDI CORE // BUILD 2.026
+    </div>
+
+</footer>
+
+
+
+<!-- =========================================================
+     SCRIPTS
+     ========================================================= -->
+
+<script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+></script>
+
+<script
+    src="data/network-data.js"
+></script>
+
+<script
+    src="app.js"
+></script>
+
+
+</body>
+
+</html>
